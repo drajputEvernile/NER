@@ -1,4 +1,4 @@
-"""Download 10_distilbert-conll03-onnx into Models/NER."""
+"""Download 10_distilbert-conll03-onnx into Models/NER. Pass --force to re-download."""
 
 from __future__ import annotations
 

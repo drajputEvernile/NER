@@ -31,6 +31,7 @@ Downloads Docling OCR weights into `Models/Docling_OCR/` and all 10 NER checkpoi
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.model_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader --force
 ```
 
 ### Individual models
@@ -63,7 +64,7 @@ Downloads Docling OCR weights into `Models/Docling_OCR/` and all 10 NER checkpoi
 | `Distilbert_NER_downloader` | `Models/NER/09_distilbert-NER/` |
 | `Distilbert_conll03_onnx_downloader` | `Models/NER/10_distilbert-conll03-onnx/` |
 
-If a download fails with `CAS Client error` / `error decoding response body`, pull the latest code and retry the same command. The downloaders now use HTTP instead of Hugging Face Xet and retry up to 3 times.
+If a download fails with `CAS Client error`, `high network traffic`, or `please retry with force_download=True`, pull the latest code and retry with `--force`. Every downloader uses `force_download=True` and retries up to 5 times.
 
 ## Run the full pipeline
 

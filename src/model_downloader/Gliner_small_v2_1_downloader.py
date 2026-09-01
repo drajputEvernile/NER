@@ -1,4 +1,4 @@
-"""Download 01_gliner_small-v2.1 into Models/NER."""
+"""Download 01_gliner_small-v2.1 into Models/NER. Pass --force to re-download."""
 
 from __future__ import annotations
 

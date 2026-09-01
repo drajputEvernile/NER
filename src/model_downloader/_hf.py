@@ -81,7 +81,18 @@ def models_are_downloaded(spec: dict) -> bool:
     return _dir_has_files(dest)
 
 
-def _snapshot(repo_id: str, dest: Path, allow_patterns: list[str] | None = None) -> None:
+def wants_force(argv: list[str] | None = None) -> bool:
+    args = sys.argv[1:] if argv is None else argv
+    return "--force" in args
+
+
+def _snapshot(
+    repo_id: str,
+    dest: Path,
+    allow_patterns: list[str] | None = None,
+    *,
+    force_download: bool = True,
+) -> None:
     from huggingface_hub import snapshot_download
 
     dest.mkdir(parents=True, exist_ok=True)
@@ -89,23 +100,31 @@ def _snapshot(repo_id: str, dest: Path, allow_patterns: list[str] | None = None)
         "repo_id": repo_id,
         "local_dir": str(dest),
         "max_workers": 1,
+        "force_download": force_download,
     }
     if allow_patterns:
         kwargs["allow_patterns"] = allow_patterns
 
     last_error: Exception | None = None
-    for attempt in range(1, 4):
+    attempts = 5
+    for attempt in range(1, attempts + 1):
         try:
             snapshot_download(**kwargs)
             return
         except Exception as exc:
             last_error = exc
             print(
-                f"  download failed for {repo_id} (attempt {attempt}/3): {exc}",
+                f"  download failed for {repo_id} (attempt {attempt}/{attempts}): {exc}",
                 flush=True,
             )
-            if attempt < 3:
-                time.sleep(3 * attempt)
+            if attempt < attempts:
+                kwargs["force_download"] = True
+                wait = min(30, 5 * attempt)
+                print(
+                    f"  retrying with force_download=True in {wait}s ...",
+                    flush=True,
+                )
+                time.sleep(wait)
     assert last_error is not None
     raise last_error
 
@@ -156,18 +175,18 @@ def _download_spec(spec: dict, dest: Path, *, force: bool) -> None:
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {spec['id']} from {spec['repo']} -> {dest} ...", flush=True)
-    _snapshot(spec["repo"], dest)
+    _snapshot(spec["repo"], dest, force_download=True)
     encoder_repo = spec.get("encoder_repo")
     if encoder_repo:
         encoder_dir = dest / "encoder"
         print(f"  encoder tokenizer {encoder_repo} -> {encoder_dir}", flush=True)
-        _snapshot(encoder_repo, encoder_dir, TOKENIZER_PATTERNS)
+        _snapshot(encoder_repo, encoder_dir, TOKENIZER_PATTERNS, force_download=True)
         _copy_tokenizer_files(encoder_dir, dest)
     labels_repo = spec.get("labels_encoder_repo")
     if labels_repo:
         labels_dir = dest / "labels_encoder"
         print(f"  labels encoder {labels_repo} -> {labels_dir}", flush=True)
-        _snapshot(labels_repo, labels_dir)
+        _snapshot(labels_repo, labels_dir, force_download=True)
     _relink_gliner_paths(spec, dest)
     print(f"NER model downloaded: {dest}", flush=True)
 
@@ -200,9 +219,8 @@ def ensure_all_ner_models(*, force: bool = False) -> list[Path]:
 
 
 def downloader_main(spec_id: str, argv: list[str] | None = None) -> int:
-    del argv
     try:
-        ensure_ner_model(spec_id)
+        ensure_ner_model(spec_id, force=wants_force(argv))
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr, flush=True)
         return 1

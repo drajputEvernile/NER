@@ -1,4 +1,4 @@
-"""Download 08_bert-base-NER into Models/NER."""
+"""Download 08_bert-base-NER into Models/NER. Pass --force to re-download."""
 
 from __future__ import annotations
 

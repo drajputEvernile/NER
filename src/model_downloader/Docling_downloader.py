@@ -1,4 +1,4 @@
-"""Download Docling models into Models/Docling_OCR at the repo root."""
+"""Download Docling models into Models/Docling_OCR. Pass --force to re-download."""
 
 from __future__ import annotations
 
@@ -51,11 +51,13 @@ def ensure_docling_models(
     from docling.utils.model_downloader import download_models
 
     last_error: Exception | None = None
-    for attempt in range(1, 4):
+    attempts = 5
+    force_attempt = True
+    for attempt in range(1, attempts + 1):
         try:
             download_models(
                 output_dir=models_dir,
-                force=force,
+                force=force_attempt,
                 progress=True,
                 with_layout=True,
                 with_tableformer=True,
@@ -70,11 +72,17 @@ def ensure_docling_models(
         except Exception as exc:
             last_error = exc
             print(
-                f"  Docling download failed (attempt {attempt}/3): {exc}",
+                f"  Docling download failed (attempt {attempt}/{attempts}): {exc}",
                 flush=True,
             )
-            if attempt < 3:
-                time.sleep(3 * attempt)
+            if attempt < attempts:
+                force_attempt = True
+                wait = min(30, 5 * attempt)
+                print(
+                    f"  retrying with force=True in {wait}s ...",
+                    flush=True,
+                )
+                time.sleep(wait)
     if last_error is not None:
         raise last_error
     _ensured = True
@@ -83,9 +91,10 @@ def ensure_docling_models(
 
 
 def main(argv: list[str] | None = None) -> int:
-    del argv
+    from src.model_downloader._hf import wants_force
+
     try:
-        ensure_docling_models()
+        ensure_docling_models(force=wants_force(argv))
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr, flush=True)
         return 1
