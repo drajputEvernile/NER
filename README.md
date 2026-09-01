@@ -21,19 +21,35 @@ Downloads Docling OCR weights into `Models/Docling_OCR/` and all 10 NER checkpoi
 .\.venv\Scripts\python.exe -m src.model_downloader
 ```
 
-Docling only:
+### Individual models
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.model_downloader.Docling_downloader
-```
-
-One NER checkpoint only (example):
-
-```powershell
+.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_small_v2_1_downloader
 .\.venv\Scripts\python.exe -m src.model_downloader.Gliner_medium_v2_1_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_large_v2_1_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_multi_v2_1_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_bi_edge_v2_0_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_bi_base_v2_0_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_bi_large_v2_0_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Bert_base_NER_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Distilbert_NER_downloader
+.\.venv\Scripts\python.exe -m src.model_downloader.Distilbert_conll03_onnx_downloader
 ```
 
-Other NER downloaders live in `src/model_downloader/` (`Gliner_*`, `Bert_base_NER_downloader`, `Distilbert_NER_downloader`, `Distilbert_conll03_onnx_downloader`).
+| Command | Destination |
+|---|---|
+| `Docling_downloader` | `Models/Docling_OCR/` |
+| `Gliner_small_v2_1_downloader` | `Models/NER/01_gliner_small-v2.1/` |
+| `Gliner_medium_v2_1_downloader` | `Models/NER/02_gliner_medium-v2.1/` |
+| `Gliner_large_v2_1_downloader` | `Models/NER/03_gliner_large-v2.1/` |
+| `Gliner_multi_v2_1_downloader` | `Models/NER/04_gliner_multi-v2.1/` |
+| `Gliner_bi_edge_v2_0_downloader` | `Models/NER/05_gliner-bi-edge-v2.0/` |
+| `Gliner_bi_base_v2_0_downloader` | `Models/NER/06_gliner-bi-base-v2.0/` |
+| `Gliner_bi_large_v2_0_downloader` | `Models/NER/07_gliner-bi-large-v2.0/` |
+| `Bert_base_NER_downloader` | `Models/NER/08_bert-base-NER/` |
+| `Distilbert_NER_downloader` | `Models/NER/09_distilbert-NER/` |
+| `Distilbert_conll03_onnx_downloader` | `Models/NER/10_distilbert-conll03-onnx/` |
 
 ## Run the full pipeline
 
