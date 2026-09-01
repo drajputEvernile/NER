@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+from src.model_downloader import _env  # noqa: F401  sets HF download env vars
 
 TOKENIZER_PATTERNS = [
     "tokenizer*",
@@ -86,10 +85,29 @@ def _snapshot(repo_id: str, dest: Path, allow_patterns: list[str] | None = None)
     from huggingface_hub import snapshot_download
 
     dest.mkdir(parents=True, exist_ok=True)
-    kwargs = {"repo_id": repo_id, "local_dir": str(dest)}
+    kwargs = {
+        "repo_id": repo_id,
+        "local_dir": str(dest),
+        "max_workers": 1,
+    }
     if allow_patterns:
         kwargs["allow_patterns"] = allow_patterns
-    snapshot_download(**kwargs)
+
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            snapshot_download(**kwargs)
+            return
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"  download failed for {repo_id} (attempt {attempt}/3): {exc}",
+                flush=True,
+            )
+            if attempt < 3:
+                time.sleep(3 * attempt)
+    assert last_error is not None
+    raise last_error
 
 
 def _copy_tokenizer_files(src: Path, dest: Path) -> None:

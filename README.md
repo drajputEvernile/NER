@@ -51,6 +51,8 @@ Downloads Docling OCR weights into `Models/Docling_OCR/` and all 10 NER checkpoi
 | `Distilbert_NER_downloader` | `Models/NER/09_distilbert-NER/` |
 | `Distilbert_conll03_onnx_downloader` | `Models/NER/10_distilbert-conll03-onnx/` |
 
+If a download fails with `CAS Client error` / `error decoding response body`, pull the latest code and retry the same command. The downloaders now use HTTP instead of Hugging Face Xet and retry up to 3 times.
+
 ## Run the full pipeline
 
 Checks/downloads models if needed, splits `Data/Raw/`, OCRs pages, then runs all NER models:

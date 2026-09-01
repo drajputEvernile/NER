@@ -16,6 +16,7 @@ from pathlib import Path
 # fails under parallel downloads. Copy files instead.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from src.config import Image_DPI, Image_Scale
 from src.model_downloader.Docling_downloader import (

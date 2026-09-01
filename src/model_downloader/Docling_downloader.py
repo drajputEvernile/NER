@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import sys
+import time
 from pathlib import Path
 
-# Hugging Face's cache uses symlinks; on Windows without Developer Mode that
-# fails under parallel downloads. Copy files instead.
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+from src.model_downloader import _env  # noqa: F401  sets HF download env vars
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCLING_MODELS_DIR = REPO_ROOT / "Models" / "Docling_OCR"
@@ -53,18 +50,33 @@ def ensure_docling_models(
     print(f"Downloading Docling models into {models_dir} ...", flush=True)
     from docling.utils.model_downloader import download_models
 
-    download_models(
-        output_dir=models_dir,
-        force=force,
-        progress=True,
-        with_layout=True,
-        with_tableformer=True,
-        with_code_formula=False,
-        with_picture_classifier=False,
-        with_rapidocr=True,
-        rapidocr_models=["onnxruntime:english"],
-        with_easyocr=False,
-    )
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            download_models(
+                output_dir=models_dir,
+                force=force,
+                progress=True,
+                with_layout=True,
+                with_tableformer=True,
+                with_code_formula=False,
+                with_picture_classifier=False,
+                with_rapidocr=True,
+                rapidocr_models=["onnxruntime:english"],
+                with_easyocr=False,
+            )
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"  Docling download failed (attempt {attempt}/3): {exc}",
+                flush=True,
+            )
+            if attempt < 3:
+                time.sleep(3 * attempt)
+    if last_error is not None:
+        raise last_error
     _ensured = True
     print(f"Docling models downloaded: {models_dir}", flush=True)
     return models_dir
