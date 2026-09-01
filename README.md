@@ -11,6 +11,18 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+If pip fails with `SSL: CERTIFICATE_VERIFY_FAILED` / `unable to get local issuer certificate` (corporate proxy or Windows CA store), install with trusted PyPI hosts:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org -r requirements.txt
+```
+
+Then, so Hugging Face model downloads use the same Windows certificates:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org pip-system-certs
+```
+
 DPI and OCR scale are in `src/config.py` (`Image_DPI = 250`, `Image_Scale = 4000`).
 
 ## Download models
