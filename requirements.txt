@@ -1,0 +1,7 @@
+pillow>=12.0.0
+pypdfium2>=5.9.0
+docling[rapidocr]>=2.59.0
+gliner>=0.2.21
+sentencepiece>=0.2.0
+transformers>=4.51.3,<5.14.0
+
