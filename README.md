@@ -1,94 +1,115 @@
-# NER
+# Member verification
 
-Document pipeline: split pages, OCR them with Docling, then run every person-name NER model.
-
-Put PDF, TIF, TIFF files, or folders of already-split PNG/JPG/JPEG pages, in `Data/Raw/`.
-
-## Setup
+OCR chart pages, then rule-based + NER member verification. Run every command from the repo root with the repo `.venv`.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+copy .env.example .env
 ```
 
-If pip fails with `SSL: CERTIFICATE_VERIFY_FAILED` / `unable to get local issuer certificate` (corporate proxy or Windows CA store), install with trusted PyPI hosts:
+Fill Azure keys in `.env` only if you use Azure OCR. Copy `Data/Raw/system_input.csv` and put page images in `Data/Raw/{RecordId}/`.
+
+Turn engines and NER models on or off in `.env`:
+
+```
+DOCLING_OCR=true
+AZURE_OCR=false
+GLINER_LARGE=true
+GLINER_MEDIUM=true
+GLINER_LOW=true
+DISTILROBERTA_BASE_NER=true
+```
+
+## Run OCR
+
+Uses Docling and/or Azure based on `.env`. Writes JSON and TXT under each record’s OCR output folder. Existing JSON files are reused.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org -r requirements.txt
+.\.venv\Scripts\python.exe "src\OCR\run.py"
 ```
 
-Then, so Hugging Face model downloads use the same Windows certificates:
+## Run member verification
+
+Runs OCR (cached pages skip conversion), then verification for every enabled NER model.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org pip-system-certs
+.\.venv\Scripts\python.exe "src\Member Verification\run.py"
 ```
 
-DPI and OCR scale are in `src/config.py` (`Image_DPI = 250`, `Image_Scale = 4000`).
-
-## Download models
-
-Downloads Docling OCR weights into `Models/Docling_OCR/` and all 10 NER checkpoints into `Models/NER/`. Skips anything already present.
+Same pipeline:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.model_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader --force
+.\.venv\Scripts\python.exe src\run.py
 ```
 
-### Individual models
+Outputs per record:
+
+- `Data/output/{RecordId}/Docling_OCR_Output/`
+- `Data/output/{RecordId}/Member_Verification_Output/{model}.csv`
+- `Data/output/{RecordId}/ner_output/{model}.csv`
+
+## Download NER models
+
+Hugging Face is used only here. Inference stays local.
+
+All four:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.model_downloader.Docling_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_small_v2_1_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_medium_v2_1_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_large_v2_1_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_multi_v2_1_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_bi_edge_v2_0_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_bi_base_v2_0_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Gliner_bi_large_v2_0_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Bert_base_NER_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Distilbert_NER_downloader
-.\.venv\Scripts\python.exe -m src.model_downloader.Distilbert_conll03_onnx_downloader
+$env:HF_HUB_DISABLE_XET='1'
+.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\__main__.py"
 ```
 
-| Command | Destination |
+One model at a time:
+
+```powershell
+$env:HF_HUB_DISABLE_XET='1'
+.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\gliner_large_v2_1.py"
+.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\gliner_medium_v2_1.py"
+.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\gliner_low.py"
+.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\distilroberta_base_ner.py"
+```
+
+| Script | Local folder |
 |---|---|
-| `Docling_downloader` | `Models/Docling_OCR/` |
-| `Gliner_small_v2_1_downloader` | `Models/NER/01_gliner_small-v2.1/` |
-| `Gliner_medium_v2_1_downloader` | `Models/NER/02_gliner_medium-v2.1/` |
-| `Gliner_large_v2_1_downloader` | `Models/NER/03_gliner_large-v2.1/` |
-| `Gliner_multi_v2_1_downloader` | `Models/NER/04_gliner_multi-v2.1/` |
-| `Gliner_bi_edge_v2_0_downloader` | `Models/NER/05_gliner-bi-edge-v2.0/` |
-| `Gliner_bi_base_v2_0_downloader` | `Models/NER/06_gliner-bi-base-v2.0/` |
-| `Gliner_bi_large_v2_0_downloader` | `Models/NER/07_gliner-bi-large-v2.0/` |
-| `Bert_base_NER_downloader` | `Models/NER/08_bert-base-NER/` |
-| `Distilbert_NER_downloader` | `Models/NER/09_distilbert-NER/` |
-| `Distilbert_conll03_onnx_downloader` | `Models/NER/10_distilbert-conll03-onnx/` |
+| `gliner_large_v2_1.py` | `src/Member Verification/extractors/ner_based/ner_models/models/gliner_large-v2.1/` |
+| `gliner_medium_v2_1.py` | `src/Member Verification/extractors/ner_based/ner_models/models/gliner_medium-v2.1/` |
+| `gliner_low.py` | `src/Member Verification/extractors/ner_based/ner_models/models/gliner_low/` |
+| `distilroberta_base_ner.py` | `src/Member Verification/extractors/ner_based/ner_models/models/distilroberta-base-ner/` |
 
-If a download fails with `CAS Client error`, `high network traffic`, or `please retry with force_download=True`, pull the latest code and retry with `--force`. Every downloader uses `force_download=True` and retries up to 5 times.
+## Change paths
 
-## Run the full pipeline
+Paths are not in `.env`. Edit the `config.py` in the folder you are using. Values are relative to the repo root unless you pass an absolute path to `repo_path(...)`.
 
-Checks/downloads models if needed, splits `Data/Raw/`, OCRs pages, then runs all NER models:
+**OCR** — `src/OCR/config.py` and the matching engine file:
 
-```powershell
-.\.venv\Scripts\python.exe -m src
-```
+| Variable | File | Default |
+|---|---|---|
+| `RAW_Read_Path` | `src/OCR/config.py`, `src/OCR/Docling OCR/config.py`, `src/OCR/Azure OCR/config.py` | `Data/Raw` |
+| `Docling_OCR_Output_path` | `src/OCR/config.py`, `src/OCR/Docling OCR/config.py` | `Data/output` |
+| `Docling_OCR_Folder` | same | `Docling_OCR_Output` |
+| `Azure_OCR_Output_path` | `src/OCR/config.py`, `src/OCR/Azure OCR/config.py` | `Data/output` |
+| `Azure_OCR_Folder` | same | `Azure_OCR_Output` |
 
-Outputs:
+**Member verification** — `src/Member Verification/config.py`:
 
-- `Data/Processed/<document>/splitted/` — page JPEGs
-- `Data/Processed/<document>/ocr/` — page text, JSON, confidence CSV
-- `Data/Processed/<document>/NER/<model_id>/<document>.csv` — person names and bounding-box polygons
-- `Data/Processed/<document>/NER/comparison.csv` — per-model name counts
+| Variable | Default |
+|---|---|
+| `RAW_Read_Path` | `Data/Raw` |
+| `System_Input_path` | `Data/Raw/system_input.csv` |
+| `OCR_Read_path` | `Data/output` |
+| `OCR_Read_Folder` | `Docling_OCR_Output` |
+| `MV_Output_path` | `Data/output` |
+| `MV_Output_Folder` | `Member_Verification_Output` |
+| `NER_Output_path` | `Data/output` |
+| `NER_Output_Folder` | `ner_output` |
 
-Optional arguments: `--input`, `--output`, `--dpi`, `--scale`.
+Example: point verification at Azure OCR text by setting `OCR_Read_Folder = "Azure_OCR_Output"`.
 
-## Run one stage
+**NER weights** — `src/Member Verification/extractors/ner_based/config.py`:
 
-```powershell
-.\.venv\Scripts\python.exe -m src.splitter
-.\.venv\Scripts\python.exe -m src.ocr
-.\.venv\Scripts\python.exe -m src.NER
-```
+| Variable | Default |
+|---|---|
+| `NER_MODELS_PATH` | `src/Member Verification/extractors/ner_based/ner_models/models` |
 
-NER defaults to every model. Limit to one checkpoint with `--model 02_gliner_medium-v2.1`.
+Keep folder names in the Docling, Azure, and member-verification configs in sync if you change them in more than one file.

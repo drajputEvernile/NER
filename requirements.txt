@@ -1,7 +1,17 @@
+# OCR
 pillow>=12.0.0
 pypdfium2>=5.9.0
 docling[rapidocr]>=2.59.0
+
+# NER
 gliner>=0.2.21
 sentencepiece>=0.2.0
 transformers>=4.51.3,<5.14.0
+huggingface_hub>=0.26.0
 
+# Pipeline
+pandas>=2.2.0
+
+# Azure OCR
+azure-ai-documentintelligence
+azure-core

@@ -1,1 +1,0 @@
-"""NER pipeline source package."""

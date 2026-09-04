@@ -1,0 +1,173 @@
+Member Verification Guide
+ 
+Base Rules
+1. Any two evidences should match to process the record further or it will be
+considered as Incorrect Member details.
+2. Amongst all three of them, Member Name is mandatory to match. If
+Member Name is not given though correct DOB & Member ID given, we
+will still reject those orders
+3. We need to verify these details in all the pages of record received.
+4. System Data May Contain Two Word Name and Three Word Name
+ 
+What If Scenarios
+1. "What If…………Incorrect Member received along with the correct Member"
+The incorrect Member is received on some of pages in the middle of chart,
+then pages must be deleted as per listed below criteria.
+Delete Operation
+50 or More than 50 pages – Maximum, we can delete 5 Pages 
+Less than 50 Pages - We can delete 10% Pages maximum
+Move Operation
+If we receive multiple Members’ information with requested Member’s
+information, we will move the order to Splitting queue on a condition that
+the incorrect Member’s information is given either on first 5 pages/last 5
+pages.
+From above two scenarios, if the incorrect Member count exceeds 10% or 5 pages, we will reject the case due to wrong Member pages.
+ 
+Input Method 1: If Two Word Names(Patient Name = First Name + Second Name) + "DOB" + "Member ID"
+System Input Data
+Patient Name: Robert Smith
+DOB: 1/15/1980
+Member ID: 1125469686
+ 
+Reject Scenarios
+Scenario 1: "Patient name is totally Incorrect"
+If "Patient Name"= Maria Garcia, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 2: "No DOB & Member Available in Chart (Two identifier is not matched)"
+If "Patient Name"= Robert Smith, "DOB"= N/A , and "Member ID"= N/A
+ 
+Scenario 3: "Patient Name is totally incorrect but DOB and member ID are correct"
+If "Patient Name"= Maria Garcia, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Scenario 4: "Patient name & DOB Totally are Incorrect"
+If "Patient Name"= Maria Garcia, "DOB"= 11/20/1985, and "Member ID"= N?A
+ 
+Scenario 5: "Patient first name Or Second Name is incorrect (Partial Name is mismatch)"
+If "Patient Name"= William Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 6: "Patient First name or Second Name is incorrect But correct Member ID given (Partial Name is mismatch)"
+If "Patient Name"= William Smith, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Scenario 7: "First Name Initial or Second Name Initial along with one full name matching (Initial name is available)"
+If "Patient Name"= R Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 8: "DOB Totally Incorrect/One digit is incorrect/two digit incorrect"
+If "Patient Name"= Robert Smith, "DOB"= 11/20/1985, and "Member ID"= N/A
+ 
+Scenario 9: "Patient First name is not matching
+If "Patient Name"= R Smith John, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 10: "Patient First name is not matching however DOB and member ids are correct"
+If "Patient Name"= R Smith John, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Scenario 11: "Two identifiers are not matched"
+If "Patient Name"= Robert Smith, "DOB"= 5/20/1991, and "Member ID"= 5520613544
+ 
+Scenario 12: "System both full names are not matched"
+If "Patient Name"= R S John, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 13: "System both full names are not matched however DOB and Member Ids are correct"
+If "Patient Name"= R S John, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Scenario 14: "2nd Name is mismatch ( In Female case - 2nd name is changed after marriage)"
+If "Patient Name"= Robert John, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 15: "System both full names are not matched."
+If "Patient Name"= Jose R Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 16: "System both full names are not matched. However DOB and Member ID are correct"
+If "Patient Name"= Jose, R Smith, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Process Scenarios
+Scenario 1: "First Name Initial Or Second Name initial But Correct DOB & Member ID Given (Initial name is available)"
+If "Patient Name"= Robert S, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Scenario 2: "DOB Totally Incorrect/One digit is incorrect/two digit incorrect But Correct Member ID given"
+If "Patient Name"= Robert Smith, "DOB"= 11/20/1985, and "Member ID"= 1125469686
+ 
+Scenario 3: "No DOB Available in Chart But Correct Member ID available"
+If "Patient Name"= Robert Smith, "DOB"= N/A, and "Member ID"= 1125469686
+ 
+Scenario 4: "Patient Additional names are given along with DOB or member id"
+If "Patient Name"= Robert Mark Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 5: "Patient First name is given after comma (,)"
+If "Patient Name"= Smith, Robert, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 6: "Patient Additional names are given along with DOB or member id"
+If "Patient Name"= Robert Smith John, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 7: "Full names are matched. (If both the full names are matched we will not validate "T" Initial letter."
+If "Patient Name"= Robert T Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 8: "Both the names are matched along with correct DOB or member ids"
+If "Patient Name"= Jr Robert Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 9: "Both the names are matched along with correct DOB or member ids"
+If "Patient Name"= Sr Robert Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 10: "Patient Additional names are given along with DOB"
+If "Patient Name"= Smith John, Robert, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 11: "Names are exchanged"
+If "Patient Name"= Smith Robert, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Input Method 2: If Three Name Word Names(Patient Name = First Name + Second Name + Third Name) + "DOB" + "Member ID"
+System Input Data
+Patient Name: Robert Smith Jose
+DOB: 1/15/1980
+Member ID: 1125469686
+ 
+Reject Scenarios
+Scenario 1: "Only Two name match with correct DOB (Partial name is mismatch)"    
+If "Patient Name"= Ronald Smith Jose, "DOB"= 1/15/1980, and "Member ID"= N/A
+If "Patient Name"= Robert Steve Jose, "DOB"= 1/15/1980, and "Member ID"= N/A
+If "Patient Name"= Robert Smith John, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 2: "Only Two name match with correct DOB & Member ID (Partial Name is mismatch)"    
+If "Patient Name"= Ronald Smith Jose, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+If "Patient Name"= Robert Steve Jose, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+If "Patient Name"= Robert Smith John, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Scenario 3: "Initials are given of first and second name with correct DOB"
+If "Patient Name"= R  S  Jose, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 4: "Initials are given of first and second name with correct DOB"
+If "Patient Name"= R  S  Jose, "DOB"= 1/15/1980, and "Member ID"= 1125469686
+ 
+Accept Scenarios
+Scenario 1: "Two name match with correct DOB"
+If "Patient Name"= Robert Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 2: "System all name matched"
+If "Patient Name"= Jose Robert Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 3: "Second name initial with Correct DOB"
+If "Patient Name"= Robert S Jose, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 4: "Second name initial with Correct DOB"
+If "Patient Name"= Robert G Jose, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 5: "Third name initial With correct Member ID"
+If "Patient Name"= Robert Smith S, "DOB"= NA, and "Member ID"= 1125469686
+ 
+Scenario 6: "Third name initial With correct DOB"
+If "Patient Name"= Robert Smith J, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 7: "First Name initial along with two correct name"
+If "Patient Name"= R Smith Jose, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 8: "Both the names are matched along with correct DOB or member Ids"
+If "Patient Name"= Jr Robert Smith Jose, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 9: "All the names are matched (First name is given after comm(,)"
+If "Patient Name"= Smith Jose, Robert, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 10: "All the names are matched (First name is given after comm(,)"
+If "Patient Name"= Jose, Robert Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 11: "Initial letter of First Name along with second & third names are matched (DOB is matched)"
+If "Patient Name"= Jose, R Smith, "DOB"= 1/15/1980, and "Member ID"= N/A
+ 
+Scenario 12: "Initial letter of First Name along with second & third names are matched (DOB is matched and Member ID are matched)"
+If "Patient Name"= Jose, R Smith, "DOB"= 1/15/1980, and "Member ID"= 1125469686

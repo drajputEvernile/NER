@@ -1,1 +1,0 @@
-"""Named-entity recognition stages."""

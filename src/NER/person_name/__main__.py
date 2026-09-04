@@ -1,4 +1,0 @@
-from src.NER.person_name.extract import main
-
-if __name__ == "__main__":
-    raise SystemExit(main())
