@@ -1,24 +1,17 @@
-"""List the first folder under the blob PREFIX and copy it locally.
+"""Blob write smoke test.
 
-This storage account requires Microsoft Entra auth (account keys are blocked).
+Creates imaging-pipeline/OCR_Processed/ then uploads:
+  Blob_Test/OCR_Processed/test1/IMG_0325.PNG
+  -> imaging-pipeline/OCR_Processed/test1/IMG_0325.PNG
 
 .env:
   AZURE_STORAGE_AUTH=entra
   AZURE_STORAGE_ACCOUNT_NAME=...
   AZURE_STORAGE_CONTAINER=imaging-pipeline
-  AZURE_STORAGE_PREFIX=Raw_Input/Run1/Batch1/Deid_Images
+  AZURE_STORAGE_WRITE_PREFIX=OCR_Processed
 
-Then sign in once (recommended):
-  az login
-
-After that, runs reuse the CLI token. If az is not logged in, the browser opens once
-and the token is cached for later runs.
-
-Local copy goes to:
-  Blob_Test/output/{first_folder_name}/...
-
-Usage (from repo root):
-  .\\.venv\\Scripts\\python.exe Blob_Test\\run.py
+Usage:
+  python run.py
 """
 
 from __future__ import annotations
@@ -39,7 +32,6 @@ _BLOB_SERVICE_CLIENT = None
 
 
 def _entra_credential():
-    """Login once via az login, or once via browser with a persistent token cache."""
     from azure.identity import (
         AzureCliCredential,
         ChainedTokenCredential,
@@ -65,7 +57,7 @@ def blob_service_client():
         account = blob_config.AZURE_STORAGE_ACCOUNT_NAME
         if not account:
             raise SystemExit("AZURE_STORAGE_ACCOUNT_NAME is required for Entra auth")
-        logger.info("auth=microsoft_entra account=%s (cli cache or one browser login)", account)
+        logger.info("auth=microsoft_entra account=%s", account)
         _BLOB_SERVICE_CLIENT = BlobServiceClient(
             account_url=f"https://{account}.blob.core.windows.net",
             credential=_entra_credential(),
@@ -91,150 +83,70 @@ def blob_service_client():
 
 def container_client():
     if not blob_config.storage_configured():
-        if blob_config.use_entra():
-            raise SystemExit(
-                "Azure Blob Storage is not configured for Entra. Set AZURE_STORAGE_ACCOUNT_NAME "
-                "and AZURE_STORAGE_CONTAINER in .env, then run: az login"
-            )
         raise SystemExit(
-            "Azure Blob Storage is not configured. Set AZURE_STORAGE_CONTAINER and either "
-            "AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY in .env"
+            "Azure Blob Storage is not configured. Set ACCOUNT_NAME + CONTAINER in .env"
         )
     return blob_service_client().get_container_client(blob_config.AZURE_STORAGE_CONTAINER)
 
 
-def prefix() -> str:
-    value = blob_config.AZURE_STORAGE_PREFIX
+def write_prefix() -> str:
+    value = blob_config.AZURE_STORAGE_WRITE_PREFIX
     return f"{value}/" if value else ""
 
 
-def _item_name(item) -> str:
-    return str(getattr(item, "name", "") or "")
-
-
-def _is_prefix(item) -> bool:
-    name = _item_name(item)
-    return name.endswith("/") or type(item).__name__ == "BlobPrefix"
-
-
-def list_children(base: str) -> tuple[list[str], list[str]]:
-    """Return (folder_names, file_names) directly under base using delimiter listing."""
+def ensure_folder(folder_prefix: str) -> None:
+    """Create a virtual folder in blob storage (empty marker blob ending with /)."""
     client = container_client()
-    folders: list[str] = []
-    files: list[str] = []
-    for item in client.walk_blobs(name_starts_with=base, delimiter="/"):
-        name = _item_name(item)
-        if not name:
-            continue
-        if _is_prefix(item) or name.endswith("/"):
-            relative = name[len(base) :] if base and name.startswith(base) else name
-            folder = relative.strip("/")
-            if folder and "/" not in folder:
-                folders.append(folder)
-            continue
-        relative = name[len(base) :] if base and name.startswith(base) else name
-        if relative and "/" not in relative.strip("/"):
-            files.append(Path(name).name)
-    return sorted(set(folders)), sorted(set(files))
+    name = folder_prefix if folder_prefix.endswith("/") else f"{folder_prefix}/"
+    logger.info("create folder %s/%s", blob_config.AZURE_STORAGE_CONTAINER, name.rstrip("/"))
+    client.upload_blob(name=name, data=b"", overwrite=True)
 
 
-def list_folders_from_blobs(base: str) -> list[str]:
-    """Fallback: derive immediate child folders from flat blob names under base."""
+def local_upload_files() -> list[Path]:
+    root = blob_config.LOCAL_Upload_Path
+    if not root.is_dir():
+        raise SystemExit(f"Local upload folder not found: {root}")
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    if not files:
+        raise SystemExit(f"No files under {root}")
+    return files
+
+
+def test_write() -> None:
     client = container_client()
-    names: set[str] = set()
-    count = 0
-    for blob in client.list_blobs(name_starts_with=base):
-        count += 1
-        name = blob.name
-        if base and not name.startswith(base):
-            continue
-        relative = name[len(base) :] if base else name
-        relative = relative.strip("/")
-        if not relative:
-            continue
-        folder = relative.split("/", 1)[0]
-        if folder:
-            names.add(folder)
-        if count >= 5000:
-            break
-    logger.info("fallback scanned %s blob(s) under %r", count, base or "(root)")
-    return sorted(names)
+    dest_root = write_prefix()
+    if not dest_root:
+        raise SystemExit("AZURE_STORAGE_WRITE_PREFIX is empty")
 
+    ensure_folder(dest_root)
 
-def probe_path() -> None:
-    """Print what exists at container root and each PREFIX segment."""
-    client = container_client()
-    segments = [part for part in blob_config.AZURE_STORAGE_PREFIX.split("/") if part]
-    current = ""
-    logger.info("probing container path...")
-    folders, files = list_children(current)
-    logger.info("  / -> folders=%s files=%s", folders[:20], files[:10])
+    files = local_upload_files()
+    logger.info(
+        "WRITE test: upload %s file(s) from %s -> %s/%s",
+        len(files),
+        blob_config.LOCAL_Upload_Path,
+        blob_config.AZURE_STORAGE_CONTAINER,
+        dest_root.rstrip("/"),
+    )
 
-    built: list[str] = []
-    for part in segments:
-        built.append(part)
-        current = "/".join(built) + "/"
-        folders, files = list_children(current)
-        logger.info("  /%s -> folders=%s files=%s", "/".join(built), folders[:20], files[:10])
-        if not folders and not files:
-            # show a few raw blob names that start with a shorter prefix for clues
-            samples = []
-            for blob in client.list_blobs(name_starts_with="/".join(built[: max(1, len(built) - 1)]) + "/"):
-                samples.append(blob.name)
-                if len(samples) >= 5:
-                    break
-            if samples:
-                logger.info("  sample blobs near here: %s", samples)
-            break
+    uploaded: list[str] = []
+    for path in files:
+        relative = path.relative_to(blob_config.LOCAL_Upload_Path).as_posix()
+        # also ensure subfolder exists, e.g. OCR_Processed/test1/
+        parent = Path(relative).parent.as_posix()
+        if parent and parent != ".":
+            ensure_folder(f"{dest_root}{parent}")
+        blob_name = f"{dest_root}{relative}"
+        logger.info("upload %s -> %s", path, blob_name)
+        with path.open("rb") as handle:
+            client.upload_blob(name=blob_name, data=handle, overwrite=True)
+        uploaded.append(blob_name)
 
+    for blob_name in uploaded:
+        props = client.get_blob_client(blob_name).get_blob_properties()
+        logger.info("WRITE verified: %s (%s bytes)", blob_name, props.size)
 
-def list_folders() -> list[str]:
-    base = prefix()
-    folders, files = list_children(base)
-    if files and not folders:
-        logger.info("prefix has %s loose file(s), no subfolders", len(files))
-    if folders:
-        return folders
-    # walk_blobs sometimes returns nothing for virtual dirs; derive from blob names
-    return list_folders_from_blobs(base)
-
-
-def list_blobs_in_folder(folder_name: str) -> list[str]:
-    client = container_client()
-    base = f"{prefix()}{folder_name}/"
-    blobs: list[str] = []
-    for blob in client.list_blobs(name_starts_with=base):
-        name = blob.name
-        if name.endswith("/"):
-            continue
-        blobs.append(name)
-    return sorted(blobs)
-
-
-def download_folder(folder_name: str, dest_root: Path) -> Path:
-    dest = dest_root / folder_name
-    dest.mkdir(parents=True, exist_ok=True)
-    client = container_client()
-    blobs = list_blobs_in_folder(folder_name)
-    if not blobs:
-        logger.info("folder %s has no files", folder_name)
-        return dest
-
-    logger.info("downloading %s file(s) from %s", len(blobs), folder_name)
-    for blob_name in blobs:
-        relative = blob_name
-        base = f"{prefix()}{folder_name}/"
-        if relative.startswith(base):
-            relative = relative[len(base) :]
-        target = dest / Path(*relative.split("/"))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_file() and target.stat().st_size > 0:
-            logger.info("skip (exists) %s", target)
-            continue
-        logger.info("download %s -> %s", blob_name, target)
-        with target.open("wb") as handle:
-            client.download_blob(blob_name).readinto(handle)
-    return dest
+    logger.info("WRITE ok: %s file(s) under %s", len(uploaded), dest_root.rstrip("/"))
 
 
 def main() -> int:
@@ -243,28 +155,11 @@ def main() -> int:
     logging.getLogger("azure.identity").setLevel(logging.WARNING)
 
     logger.info("container=%s", blob_config.AZURE_STORAGE_CONTAINER)
-    logger.info("prefix=%s", blob_config.AZURE_STORAGE_PREFIX or "(root)")
+    logger.info("write_prefix=%s", blob_config.AZURE_STORAGE_WRITE_PREFIX or "(root)")
     logger.info("auth_mode=%s", blob_config.AZURE_STORAGE_AUTH)
 
-    probe_path()
-    folders = list_folders()
-    logger.info("found %s folder(s) under prefix", len(folders))
-    if not folders:
-        raise SystemExit(
-            "No folders found under the configured PREFIX. "
-            "Check the probe output above and fix AZURE_STORAGE_PREFIX casing/path in .env"
-        )
-
-    first = folders[0]
-    logger.info("first folder=%s", first)
-    for index, name in enumerate(folders[:10], start=1):
-        logger.info("  %s. %s", index, name)
-    if len(folders) > 10:
-        logger.info("  ... and %s more", len(folders) - 10)
-
-    dest = download_folder(first, blob_config.LOCAL_Download_Path)
-    files = [path for path in dest.rglob("*") if path.is_file()]
-    logger.info("done. copied folder to %s (%s file(s))", dest, len(files))
+    test_write()
+    logger.info("done: write test passed")
     return 0
 
 

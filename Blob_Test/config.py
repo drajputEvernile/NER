@@ -8,8 +8,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 
-# Local copy destination for the first blob folder under PREFIX.
-LOCAL_Download_Path = HERE / "output"
+# Local folder to upload for the write test:
+#   Blob_Test/OCR_Processed/test1/IMG_0325.PNG
+LOCAL_Upload_Path = HERE / "OCR_Processed"
+
+# Blob destination under the container (sibling of Raw_Input):
+#   imaging-pipeline/OCR_Processed/test1/...
+AZURE_STORAGE_WRITE_PREFIX = "OCR_Processed"
 
 
 def _load_repo_env() -> None:
@@ -35,6 +40,9 @@ AZURE_STORAGE_ACCOUNT_NAME = (os.environ.get("AZURE_STORAGE_ACCOUNT_NAME") or ""
 AZURE_STORAGE_ACCOUNT_KEY = (os.environ.get("AZURE_STORAGE_ACCOUNT_KEY") or "").strip()
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
 AZURE_STORAGE_PREFIX = (os.environ.get("AZURE_STORAGE_PREFIX") or "").strip().strip("/")
+AZURE_STORAGE_WRITE_PREFIX = (
+    os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or AZURE_STORAGE_WRITE_PREFIX
+).strip().strip("/")
 
 
 def storage_configured() -> bool:
