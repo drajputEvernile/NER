@@ -1,10 +1,10 @@
 """Standalone Azure OCR paths and credentials.
 
 Reads record images from RAW_Read_Path (local/network) in place — no raw copy.
-Writes OCR JSON to Azure Blob Storage under OCR_Processed.
+Writes OCR JSON to Azure Blob Storage under OCR_Processed/Final2.
 
 Blob layout:
-  {container}/OCR_Processed/{record_id}/{record_id}_final2.json
+  {container}/OCR_Processed/Final2/{record_id}/{record_id}_final2.json
 
 Secrets and storage settings come from the repo-root .env.
 """
@@ -50,7 +50,9 @@ AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT = (os.environ.get("AZURE_DOCUMENT_INTELLIGE
 AZURE_DOCUMENT_INTELLIGENCE_KEY = (os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY") or "").strip()
 AZURE_POLL_TIMEOUT_SECONDS = int((os.environ.get("AZURE_POLL_TIMEOUT_SECONDS") or str(AZURE_POLL_TIMEOUT_SECONDS)).strip() or 180)
 
-AZURE_STORAGE_WRITE_PREFIX = (os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed").strip().strip("/")
+AZURE_STORAGE_WRITE_PREFIX = (
+    os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed/Final2"
+).strip().strip("/")
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
 
 
