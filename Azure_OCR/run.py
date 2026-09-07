@@ -20,9 +20,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
-SRC = REPO_ROOT / "src"
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(REPO_ROOT / "azure_blob"))
 
 import azure_blob_storage as blob_store
 import config as azure_config

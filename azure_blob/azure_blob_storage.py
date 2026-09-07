@@ -15,13 +15,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SRC = Path(__file__).resolve().parent
-_REPO_ROOT = _SRC.parent
+HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent
 _CLIENT = None
 
 
 def _load_repo_env() -> None:
-    env_path = _REPO_ROOT / ".env"
+    env_path = REPO_ROOT / ".env"
     if not env_path.is_file():
         return
     for raw in env_path.read_text(encoding="utf-8").splitlines():
@@ -121,7 +121,7 @@ def record_ocr_blob_name(record_id: str) -> str:
 
 
 def list_ocr_record_ids() -> list[str]:
-    """Record folders under OCR_Processed that have a {id}_final2.json."""
+    """Record folders under OCR_Processed/Final2."""
     client = container_client()
     base = f"{AZURE_STORAGE_WRITE_PREFIX}/" if AZURE_STORAGE_WRITE_PREFIX else ""
     names: list[str] = []
@@ -134,7 +134,6 @@ def list_ocr_record_ids() -> list[str]:
         if folder and "/" not in folder:
             names.append(folder)
     if not names:
-        # Fallback from blob names
         for blob in client.list_blobs(name_starts_with=base):
             relative = blob.name[len(base) :] if base and blob.name.startswith(base) else blob.name
             relative = relative.strip("/")

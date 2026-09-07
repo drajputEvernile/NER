@@ -20,6 +20,8 @@ REPO_ROOT = HERE.parent
 SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(REPO_ROOT / "azure_blob") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "azure_blob"))
 
 # Source: record folders to read (network or local).
 RAW_Read_Path = Path(r"E:\Projects\NER\rawi")

@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent
+REPO_ROOT = SRC.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(REPO_ROOT / "azure_blob"))
 
 import config as mv_config
 
