@@ -23,11 +23,13 @@ DISTILROBERTA_BASE_NER=true
 
 ## Run OCR
 
-Uses Docling and/or Azure based on `.env`. Writes JSON and TXT under each record’s OCR output folder. Existing JSON files are reused.
+Uses Docling and/or Azure based on `.env`. Writes **one JSON per record** (not per page). Existing combined JSON is reused. Old per-page JSON files are merged into the combined file if those exist and the combined file does not.
 
 ```powershell
 .\.venv\Scripts\python.exe "src\OCR\run.py"
 ```
+
+Per record, for example Test1: `Data/output/Test1/Docling_OCR_Output/Test1.json`. Member verification reads `pages[].content`.
 
 ## Run member verification
 
@@ -45,7 +47,7 @@ Same pipeline:
 
 Outputs per record:
 
-- `Data/output/{RecordId}/Docling_OCR_Output/`
+- `Data/output/{RecordId}/Docling_OCR_Output/{RecordId}.json`
 - `Data/output/{RecordId}/Member_Verification_Output/{model}.csv`
 - `Data/output/{RecordId}/ner_output/{model}.csv`
 
