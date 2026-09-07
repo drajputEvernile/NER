@@ -4,7 +4,7 @@ First run snapshots the folder count and name list. Later runs resume from the
 last unfinished record/page and skip anything already written in blob storage.
 
 Blob output:
-  {container}/OCR_Processed/Final2/{record_id}/{record_id}_final2.json
+  {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
 
 Usage (from repo root):
   .\\.venv\\Scripts\\python.exe Azure_OCR\\run.py

@@ -3,7 +3,7 @@
 Used by Azure_OCR (write OCR JSON) and Member Verification (read OCR JSON).
 
 Blob layout:
-  {container}/OCR_Processed/Final2/{record_id}/{record_id}_final2.json
+  {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ AZURE_STORAGE_CONNECTION_STRING = (os.environ.get("AZURE_STORAGE_CONNECTION_STRI
 AZURE_STORAGE_ACCOUNT_NAME = (os.environ.get("AZURE_STORAGE_ACCOUNT_NAME") or "").strip()
 AZURE_STORAGE_ACCOUNT_KEY = (os.environ.get("AZURE_STORAGE_ACCOUNT_KEY") or "").strip()
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
-# OCR JSON root: OCR_Processed/Final2/{record_id}/{record_id}_final2.json
+# OCR JSON root: OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
 AZURE_STORAGE_WRITE_PREFIX = (
-    os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed/Final2"
+    os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed/Batch1/Final2"
 ).strip().strip("/")
 
 OCR_JSON_SUFFIX = "_final2.json"
@@ -121,7 +121,7 @@ def record_ocr_blob_name(record_id: str) -> str:
 
 
 def list_ocr_record_ids() -> list[str]:
-    """Record folders under OCR_Processed/Final2."""
+    """Record folders under OCR_Processed/Batch1/Final2."""
     client = container_client()
     base = f"{AZURE_STORAGE_WRITE_PREFIX}/" if AZURE_STORAGE_WRITE_PREFIX else ""
     names: list[str] = []
