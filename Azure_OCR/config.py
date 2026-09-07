@@ -1,31 +1,33 @@
 """Standalone Azure OCR paths and credentials.
 
-Set every path as a full absolute path. None of these should point inside this repo.
+Reads record images from RAW_Read_Path (local/network) in place — no raw copy.
+Writes OCR JSON to Azure Blob Storage under OCR_Processed.
 
-Secrets (endpoint, key, poll timeout) still come from the repo-root .env.
+Blob layout:
+  {container}/OCR_Processed/{record_id}/{record_id}_final2.json
+
+Secrets and storage settings come from the repo-root .env.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
+SRC = REPO_ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 # Source: record folders to read (network or local).
 RAW_Read_Path = Path(r"E:\Projects\NER\rawi")
 
-# Output root. For each record name we create:
-#   {OCR_Output_path}\{name}\raw\
-#   {OCR_Output_path}\{name}\ocr_final2\{name}_final2.json
-OCR_Output_path = Path(r"E:\Projects\NER\iMGE")
+# Local progress file only (resume state). OCR JSON lives in blob storage.
+PROGRESS_FILE = HERE / "azure_ocr_progress.json"
 
-RAW_FOLDER = "raw"
-OCR_FOLDER = "ocr_final2"
 OCR_JSON_SUFFIX = "_final2.json"
-
-PROGRESS_FILE = OCR_Output_path / "azure_ocr_progress.json"
 
 AZURE_POLL_TIMEOUT_SECONDS = 180
 
@@ -48,22 +50,9 @@ AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT = (os.environ.get("AZURE_DOCUMENT_INTELLIGE
 AZURE_DOCUMENT_INTELLIGENCE_KEY = (os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY") or "").strip()
 AZURE_POLL_TIMEOUT_SECONDS = int((os.environ.get("AZURE_POLL_TIMEOUT_SECONDS") or str(AZURE_POLL_TIMEOUT_SECONDS)).strip() or 180)
 
+AZURE_STORAGE_WRITE_PREFIX = (os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed").strip().strip("/")
+AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
 
-def record_network_dir(record_id: str) -> Path:
+
+def record_source_dir(record_id: str) -> Path:
     return RAW_Read_Path / record_id
-
-
-def record_work_dir(record_id: str) -> Path:
-    return OCR_Output_path / record_id
-
-
-def record_raw_dir(record_id: str) -> Path:
-    return record_work_dir(record_id) / RAW_FOLDER
-
-
-def record_ocr_dir(record_id: str) -> Path:
-    return record_work_dir(record_id) / OCR_FOLDER
-
-
-def record_ocr_json(record_id: str) -> Path:
-    return record_ocr_dir(record_id) / f"{record_id}{OCR_JSON_SUFFIX}"

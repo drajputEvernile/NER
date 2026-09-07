@@ -1,7 +1,6 @@
 """Docling OCR with on-disk JSON cache for the rest of the pipeline."""
 from __future__ import annotations
 
-import json
 import logging
 import math
 import sys
@@ -18,6 +17,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from env_loader import load_sibling_config
+from OCR import document as ocr_document
 
 _cfg = load_sibling_config(__file__, "docling_ocr_folder_config")
 enabled = bool(_cfg.enabled)
@@ -354,34 +354,41 @@ class DoclingOcrExtractor:
     def available(self) -> bool:
         return True
 
-    def extract_page_outputs(
-        self, image_path: Path, output_dir: Path, *, cache_stem: str | None = None, force: bool = False
+    def extract_record_outputs(
+        self, image_paths: list[Path], output_dir: Path, record_id: str, *, force: bool = False
     ) -> dict:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        stem = cache_stem or image_path.stem
-        json_path = output_dir / f"{stem}.json"
-        text_path = output_dir / f"{stem}.txt"
-        if not force and json_path.is_file():
-            logger.info("event=docling_ocr_cache_hit stem=%s path=%s", stem, json_path)
+        json_file = ocr_document.json_path(output_dir, record_id)
+        if not force and ocr_document.cached_document(output_dir, record_id) is not None:
+            logger.info("event=docling_ocr_cache_hit record=%s path=%s", record_id, json_file)
             return {
                 "model": "docling",
                 "features": {"barcodes": False, "languages": True},
-                "outputs": {
-                    "json": str(json_path),
-                    "text": str(text_path) if text_path.is_file() else "",
-                },
+                "outputs": {"json": str(json_file)},
                 "cached": True,
             }
 
+        pages_out: list[dict] = []
         started = perf_counter()
-        json_result = _run_docling(image_path)
+        for page_number, image_path in enumerate(image_paths, start=1):
+            legacy = output_dir / f"{image_path.stem}.json"
+            if not force and legacy.is_file():
+                logger.info("event=docling_ocr_legacy_page record=%s page=%s", record_id, image_path.name)
+                pages_out.append(ocr_document.load_legacy_page_file(legacy, page_number, image_path.name))
+                continue
+            logger.info("event=docling_ocr_page record=%s page=%s", record_id, image_path.name)
+            pages_out.append(ocr_document.page_from_docling(_run_docling(image_path), page_number, image_path.name))
+
+        document = {
+            "recordId": record_id,
+            "model": "docling",
+            "pageCount": len(pages_out),
+            "pages": pages_out,
+        }
+        json_file = ocr_document.write_document(output_dir, record_id, document)
         elapsed = round(perf_counter() - started, 3)
-        with json_path.open("w", encoding="utf-8") as f:
-            json.dump(json_result, f, indent=2)
-        text_path.write_text(json_result.get("content", "") or "", encoding="utf-8")
         return {
             "model": "docling",
             "features": {"barcodes": False, "languages": True},
             "docling_ocr_seconds": elapsed,
-            "outputs": {"json": str(json_path), "text": str(text_path)},
+            "outputs": {"json": str(json_file)},
         }

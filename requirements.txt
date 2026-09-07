@@ -12,6 +12,8 @@ huggingface_hub>=0.26.0
 # Pipeline
 pandas>=2.2.0
 
-# Azure OCR
+# Azure OCR + Blob Storage
 azure-ai-documentintelligence
 azure-core
+azure-storage-blob
+azure-identity

@@ -1,0 +1,5 @@
+# Azure_OCR standalone runner
+azure-ai-documentintelligence>=1.0.2
+azure-core>=1.30.0
+azure-storage-blob>=12.19.0
+azure-identity>=1.17.0

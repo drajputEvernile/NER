@@ -12,12 +12,16 @@ for _candidate in [_HERE, *_HERE.parents]:
             sys.path.insert(0, str(_candidate))
         break
 
-from env_loader import env_bool, repo_path
+from env_loader import env_bool, env_str, repo_path
 
 gliner_large = env_bool("GLINER_LARGE", True)
 gliner_medium = env_bool("GLINER_MEDIUM", True)
 gliner_low = env_bool("GLINER_LOW", True)
 distilroberta_base_ner = env_bool("DISTILROBERTA_BASE_NER", True)
+
+# blob = read OCR JSON from Azure Blob OCR_Processed
+# local = existing Docling/Azure local OCR folders
+OCR_SOURCE = env_str("OCR_SOURCE", "blob").strip().casefold() or "blob"
 
 RAW_Read_Path = repo_path("Data", "Raw")
 System_Input_path = repo_path("Data", "Raw", "system_input.csv")
@@ -39,6 +43,10 @@ _MODEL_FLAGS = (
 
 def enabled_model_ids() -> list[str]:
     return [model_id for model_id, on in _MODEL_FLAGS if on]
+
+
+def use_blob_ocr() -> bool:
+    return OCR_SOURCE in {"blob", "azure_blob", "ocr_processed"}
 
 
 def record_raw_dir(record_id: str) -> Path:

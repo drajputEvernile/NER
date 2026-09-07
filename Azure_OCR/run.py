@@ -1,7 +1,10 @@
-"""Copy record folders from the network path, then Azure OCR them.
+"""OCR images in place from RAW_Read_Path; write JSON to Azure Blob OCR_Processed.
 
 First run snapshots the folder count and name list. Later runs resume from the
-last unfinished record/page and skip anything already written.
+last unfinished record/page and skip anything already written in blob storage.
+
+Blob output:
+  {container}/OCR_Processed/{record_id}/{record_id}_final2.json
 
 Usage (from repo root):
   .\\.venv\\Scripts\\python.exe Azure_OCR\\run.py
@@ -11,15 +14,17 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
+REPO_ROOT = HERE.parent
+SRC = REPO_ROOT / "src"
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(SRC))
 
+import azure_blob_storage as blob_store
 import config as azure_config
 from azure_read_ocr import AzureReadOcrExtractor
 
@@ -59,32 +64,10 @@ def list_pages(record_dir: Path) -> list[Path]:
     )
 
 
-def copy_record(record_id: str) -> Path:
-    source = azure_config.record_network_dir(record_id)
-    dest = azure_config.record_raw_dir(record_id)
-    if not source.is_dir():
-        raise FileNotFoundError(f"Source record folder not found: {source}")
-    dest.mkdir(parents=True, exist_ok=True)
-    azure_config.record_ocr_dir(record_id).mkdir(parents=True, exist_ok=True)
-    for image in list_pages(source):
-        target = dest / image.name
-        if target.is_file() and target.stat().st_size == image.stat().st_size:
-            continue
-        shutil.copy2(image, target)
-        logger.info("copied %s -> %s", image, target)
-    return dest
-
-
-def document_path(record_id: str) -> Path:
-    return azure_config.record_ocr_json(record_id)
-
-
 def load_document(record_id: str) -> dict:
-    path = document_path(record_id)
-    if path.is_file():
-        data = read_json(path)
-        if isinstance(data, dict) and isinstance(data.get("pages"), list):
-            return data
+    data = blob_store.load_ocr_document(record_id)
+    if isinstance(data, dict) and isinstance(data.get("pages"), list):
+        return data
     return {
         "recordId": record_id,
         "model": "prebuilt-read",
@@ -94,8 +77,8 @@ def load_document(record_id: str) -> dict:
 
 
 def save_document(record_id: str, document: dict) -> None:
-    document["pageCount"] = len(document.get("pages") or [])
-    write_json(document_path(record_id), document)
+    blob_name = blob_store.save_ocr_document(record_id, document)
+    logger.info("saved OCR JSON -> %s/%s", blob_store.AZURE_STORAGE_CONTAINER, blob_name)
 
 
 def done_file_names(document: dict) -> set[str]:
@@ -110,7 +93,8 @@ def done_file_names(document: dict) -> set[str]:
 def new_progress(folders: list[str]) -> dict:
     return {
         "raw_read_path": str(azure_config.RAW_Read_Path),
-        "ocr_output_path": str(azure_config.OCR_Output_path),
+        "ocr_blob_container": blob_store.AZURE_STORAGE_CONTAINER,
+        "ocr_blob_prefix": blob_store.AZURE_STORAGE_WRITE_PREFIX,
         "folder_count": len(folders),
         "folders": folders,
         "completed": [],
@@ -136,7 +120,8 @@ def load_progress() -> dict:
     progress = read_json(path)
     same_paths = (
         str(progress.get("raw_read_path") or "") == str(azure_config.RAW_Read_Path)
-        and str(progress.get("ocr_output_path") or "") == str(azure_config.OCR_Output_path)
+        and str(progress.get("ocr_blob_container") or "") == blob_store.AZURE_STORAGE_CONTAINER
+        and str(progress.get("ocr_blob_prefix") or "") == blob_store.AZURE_STORAGE_WRITE_PREFIX
     )
     if not same_paths or not isinstance(progress.get("folders"), list):
         folders = list_folders(azure_config.RAW_Read_Path)
@@ -181,8 +166,10 @@ def ocr_record(record_id: str, folder_no: int, folder_count: int, progress: dict
     progress["current_record"] = record_id
     save_progress(progress)
 
-    local_dir = copy_record(record_id)
-    images = list_pages(local_dir)
+    source_dir = azure_config.record_source_dir(record_id)
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Source record folder not found: {source_dir}")
+    images = list_pages(source_dir)
     if not images:
         logger.info("skip %s (no page images)", record_id)
         _mark_completed(progress, record_id)
@@ -229,11 +216,20 @@ def ocr_record(record_id: str, folder_no: int, folder_count: int, progress: dict
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("azure.identity").setLevel(logging.WARNING)
+
     extractor = AzureReadOcrExtractor()
     if not extractor.available:
         raise SystemExit("Azure Document Intelligence is not configured. Set endpoint and key in the repo-root .env")
+    if not blob_store.storage_configured():
+        raise SystemExit("Azure Blob Storage is not configured. Set AZURE_STORAGE_* in the repo-root .env")
 
-    azure_config.OCR_Output_path.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "OCR JSON output -> %s/%s/{record}/{record}_final2.json",
+        blob_store.AZURE_STORAGE_CONTAINER,
+        blob_store.AZURE_STORAGE_WRITE_PREFIX,
+    )
 
     progress = load_progress()
     folders = list(progress.get("folders") or [])

@@ -48,16 +48,12 @@ def ocr_record(record_id: str, record_dir: Path) -> None:
         return
     if docling_ocr.enabled:
         docling_dir = docling_ocr.record_output_dir(record_id)
-        docling = DoclingOcrExtractor()
-        for image_path in pages:
-            logger.info("docling ocr %s / %s", record_id, image_path.name)
-            docling.extract_page_outputs(image_path, docling_dir, cache_stem=image_path.stem)
+        logger.info("docling ocr %s (%s pages)", record_id, len(pages))
+        DoclingOcrExtractor().extract_record_outputs(pages, docling_dir, record_id)
     if azure_read_ocr.enabled:
         azure_dir = azure_read_ocr.record_output_dir(record_id)
-        azure = AzureReadOcrExtractor()
-        for image_path in pages:
-            logger.info("azure ocr %s / %s", record_id, image_path.name)
-            azure.extract_page_outputs(image_path, azure_dir, cache_stem=image_path.stem)
+        logger.info("azure ocr %s (%s pages)", record_id, len(pages))
+        AzureReadOcrExtractor().extract_record_outputs(pages, azure_dir, record_id)
 
 
 def main() -> int:
