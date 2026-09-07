@@ -1,11 +1,18 @@
 """List the first folder under the blob PREFIX and copy it locally.
 
-Uses the same .env storage settings as Docling_OCR:
-  container = imaging-pipeline
-  prefix    = Raw_Input/Run1/Batch1/Deid_Images
+This storage account requires Microsoft Entra auth (account keys are blocked).
+
+.env:
+  AZURE_STORAGE_AUTH=entra
+  AZURE_STORAGE_ACCOUNT_NAME=...
+  AZURE_STORAGE_CONTAINER=imaging-pipeline
+  AZURE_STORAGE_PREFIX=Raw_Input/Run1/Batch1/Deid_Images
+
+Then sign in once:
+  az login
 
 Local copy goes to:
-  Blob_Test/downloaded/{first_folder_name}/...
+  Blob_Test/output/{first_folder_name}/...
 
 Usage (from repo root):
   .\\.venv\\Scripts\\python.exe Blob_Test\\run.py
@@ -29,15 +36,35 @@ logger = logging.getLogger(__name__)
 def blob_service_client():
     from azure.storage.blob import BlobServiceClient
 
+    if blob_config.use_entra():
+        from azure.identity import DefaultAzureCredential
+
+        account = blob_config.AZURE_STORAGE_ACCOUNT_NAME
+        if not account:
+            raise SystemExit("AZURE_STORAGE_ACCOUNT_NAME is required for Entra auth")
+        logger.info("auth=microsoft_entra account=%s", account)
+        return BlobServiceClient(
+            account_url=f"https://{account}.blob.core.windows.net",
+            credential=DefaultAzureCredential(exclude_interactive_browser_credential=False),
+        )
+
     if blob_config.AZURE_STORAGE_CONNECTION_STRING:
+        logger.info("auth=connection_string")
         return BlobServiceClient.from_connection_string(blob_config.AZURE_STORAGE_CONNECTION_STRING)
+
     account = blob_config.AZURE_STORAGE_ACCOUNT_NAME
     key = blob_config.AZURE_STORAGE_ACCOUNT_KEY
+    logger.info("auth=account_key account=%s", account)
     return BlobServiceClient(account_url=f"https://{account}.blob.core.windows.net", credential=key)
 
 
 def container_client():
     if not blob_config.storage_configured():
+        if blob_config.use_entra():
+            raise SystemExit(
+                "Azure Blob Storage is not configured for Entra. Set AZURE_STORAGE_ACCOUNT_NAME "
+                "and AZURE_STORAGE_CONTAINER in .env, then run: az login"
+            )
         raise SystemExit(
             "Azure Blob Storage is not configured. Set AZURE_STORAGE_CONTAINER and either "
             "AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY in .env"
@@ -92,7 +119,7 @@ def download_folder(folder_name: str, dest_root: Path) -> Path:
         base = f"{prefix()}{folder_name}/"
         if relative.startswith(base):
             relative = relative[len(base) :]
-        target = dest / relative.replace("/", "\\")
+        target = dest / Path(*relative.split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file() and target.stat().st_size > 0:
             logger.info("skip (exists) %s", target)
@@ -106,9 +133,11 @@ def download_folder(folder_name: str, dest_root: Path) -> Path:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("azure.identity").setLevel(logging.INFO)
 
     logger.info("container=%s", blob_config.AZURE_STORAGE_CONTAINER)
     logger.info("prefix=%s", blob_config.AZURE_STORAGE_PREFIX or "(root)")
+    logger.info("auth_mode=%s", blob_config.AZURE_STORAGE_AUTH)
 
     folders = list_folders()
     logger.info("found %s folder(s) under prefix", len(folders))
