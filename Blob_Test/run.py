@@ -94,14 +94,6 @@ def write_prefix() -> str:
     return f"{value}/" if value else ""
 
 
-def ensure_folder(folder_prefix: str) -> None:
-    """Create a virtual folder in blob storage (empty marker blob ending with /)."""
-    client = container_client()
-    name = folder_prefix if folder_prefix.endswith("/") else f"{folder_prefix}/"
-    logger.info("create folder %s/%s", blob_config.AZURE_STORAGE_CONTAINER, name.rstrip("/"))
-    client.upload_blob(name=name, data=b"", overwrite=True)
-
-
 def local_upload_files() -> list[Path]:
     root = blob_config.LOCAL_Upload_Path
     if not root.is_dir():
@@ -118,8 +110,6 @@ def test_write() -> None:
     if not dest_root:
         raise SystemExit("AZURE_STORAGE_WRITE_PREFIX is empty")
 
-    ensure_folder(dest_root)
-
     files = local_upload_files()
     logger.info(
         "WRITE test: upload %s file(s) from %s -> %s/%s",
@@ -129,13 +119,11 @@ def test_write() -> None:
         dest_root.rstrip("/"),
     )
 
+    # Blob "folders" are virtual. Uploading OCR_Processed/test1/file.png
+    # creates OCR_Processed and test1 in the portal — no empty marker blobs.
     uploaded: list[str] = []
     for path in files:
         relative = path.relative_to(blob_config.LOCAL_Upload_Path).as_posix()
-        # also ensure subfolder exists, e.g. OCR_Processed/test1/
-        parent = Path(relative).parent.as_posix()
-        if parent and parent != ".":
-            ensure_folder(f"{dest_root}{parent}")
         blob_name = f"{dest_root}{relative}"
         logger.info("upload %s -> %s", path, blob_name)
         with path.open("rb") as handle:
