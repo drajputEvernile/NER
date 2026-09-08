@@ -1,8 +1,9 @@
 """Shared Azure Blob Storage helpers (Entra auth).
 
-Used by Azure_OCR (write OCR JSON) and Member Verification (read OCR JSON).
+Used by Azure_OCR (read raw images + write OCR JSON) and Member Verification (read OCR JSON).
 
 Blob layout:
+  {container}/Raw_Input/Run1/Batch2/Deid_Images/{record_id}/images...
   {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
 """
 
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 _CLIENT = None
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
 
 def _load_repo_env() -> None:
@@ -39,6 +42,10 @@ AZURE_STORAGE_CONNECTION_STRING = (os.environ.get("AZURE_STORAGE_CONNECTION_STRI
 AZURE_STORAGE_ACCOUNT_NAME = (os.environ.get("AZURE_STORAGE_ACCOUNT_NAME") or "").strip()
 AZURE_STORAGE_ACCOUNT_KEY = (os.environ.get("AZURE_STORAGE_ACCOUNT_KEY") or "").strip()
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
+# Raw images: Raw_Input/Run1/Batch2/Deid_Images/{record_id}/...
+AZURE_STORAGE_PREFIX = (
+    os.environ.get("AZURE_STORAGE_PREFIX") or "Raw_Input/Run1/Batch2/Deid_Images"
+).strip().strip("/")
 # OCR JSON root: OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
 AZURE_STORAGE_WRITE_PREFIX = (
     os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed/Batch1/Final2"
@@ -120,10 +127,9 @@ def record_ocr_blob_name(record_id: str) -> str:
     return f"{prefix}/{record_id}/{record_id}{OCR_JSON_SUFFIX}"
 
 
-def list_ocr_record_ids() -> list[str]:
-    """Record folders under OCR_Processed/Batch1/Final2."""
+def _list_record_ids_under(prefix: str) -> list[str]:
     client = container_client()
-    base = f"{AZURE_STORAGE_WRITE_PREFIX}/" if AZURE_STORAGE_WRITE_PREFIX else ""
+    base = f"{prefix}/" if prefix else ""
     names: list[str] = []
     for item in client.walk_blobs(name_starts_with=base, delimiter="/"):
         name = str(getattr(item, "name", "") or "")
@@ -142,7 +148,24 @@ def list_ocr_record_ids() -> list[str]:
             folder = relative.split("/", 1)[0]
             if folder:
                 names.append(folder)
-    record_ids = sorted(set(names))
+    return sorted(set(names))
+
+
+def list_raw_record_ids() -> list[str]:
+    """Record folders under Raw_Input/.../Deid_Images."""
+    record_ids = _list_record_ids_under(AZURE_STORAGE_PREFIX)
+    logger.info(
+        "blob raw records container=%s prefix=%s count=%s",
+        AZURE_STORAGE_CONTAINER,
+        AZURE_STORAGE_PREFIX,
+        len(record_ids),
+    )
+    return record_ids
+
+
+def list_ocr_record_ids() -> list[str]:
+    """Record folders under OCR_Processed/Batch1/Final2."""
+    record_ids = _list_record_ids_under(AZURE_STORAGE_WRITE_PREFIX)
     logger.info(
         "blob OCR records container=%s prefix=%s count=%s",
         AZURE_STORAGE_CONTAINER,
@@ -152,11 +175,38 @@ def list_ocr_record_ids() -> list[str]:
     return record_ids
 
 
+def list_raw_page_blobs(record_id: str) -> list[tuple[str, str]]:
+    """Return sorted (file_name, blob_name) image pages for a raw record folder."""
+    client = container_client()
+    base = f"{AZURE_STORAGE_PREFIX}/{record_id}/"
+    pages: list[tuple[str, str]] = []
+    for blob in client.list_blobs(name_starts_with=base):
+        name = str(blob.name or "")
+        relative = name[len(base) :] if name.startswith(base) else name
+        relative = relative.strip("/")
+        if not relative or "/" in relative:
+            continue
+        suffix = Path(relative).suffix.lower()
+        if suffix not in IMAGE_EXTENSIONS:
+            continue
+        pages.append((relative, name))
+    pages.sort(key=lambda item: item[0].casefold())
+    return pages
+
+
 def upload_json(blob_name: str, data: dict) -> None:
     payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     client = container_client()
     logger.info("blob upload %s (%s bytes)", blob_name, len(payload))
     client.upload_blob(name=blob_name, data=payload, overwrite=True, content_type="application/json")
+
+
+def download_bytes(blob_name: str) -> bytes:
+    client = container_client()
+    blob = client.get_blob_client(blob_name)
+    if not blob.exists():
+        raise FileNotFoundError(f"Blob not found: {blob_name}")
+    return blob.download_blob().readall()
 
 
 def download_json(blob_name: str) -> dict | None:

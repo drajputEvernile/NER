@@ -1,9 +1,10 @@
 """Standalone Azure OCR paths and credentials.
 
-Reads record images from RAW_Read_Path (local/network) in place — no raw copy.
+Reads record images from Azure Blob Storage under AZURE_STORAGE_PREFIX.
 Writes OCR JSON to Azure Blob Storage under OCR_Processed/Batch1/Final2.
 
 Blob layout:
+  {container}/Raw_Input/Run1/Batch2/Deid_Images/{record_id}/images...
   {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
 
 Secrets and storage settings come from the repo-root .env.
@@ -23,10 +24,7 @@ if str(SRC) not in sys.path:
 if str(REPO_ROOT / "azure_blob") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "azure_blob"))
 
-# Source: record folders to read (network or local).
-RAW_Read_Path = Path(r"E:\Projects\NER\rawi")
-
-# Local progress file only (resume state). OCR JSON lives in blob storage.
+# Local progress file only (resume state). Images + OCR JSON live in blob storage.
 PROGRESS_FILE = HERE / "azure_ocr_progress.json"
 
 OCR_JSON_SUFFIX = "_final2.json"
@@ -52,11 +50,10 @@ AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT = (os.environ.get("AZURE_DOCUMENT_INTELLIGE
 AZURE_DOCUMENT_INTELLIGENCE_KEY = (os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY") or "").strip()
 AZURE_POLL_TIMEOUT_SECONDS = int((os.environ.get("AZURE_POLL_TIMEOUT_SECONDS") or str(AZURE_POLL_TIMEOUT_SECONDS)).strip() or 180)
 
+AZURE_STORAGE_PREFIX = (
+    os.environ.get("AZURE_STORAGE_PREFIX") or "Raw_Input/Run1/Batch2/Deid_Images"
+).strip().strip("/")
 AZURE_STORAGE_WRITE_PREFIX = (
     os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed/Batch1/Final2"
 ).strip().strip("/")
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
-
-
-def record_source_dir(record_id: str) -> Path:
-    return RAW_Read_Path / record_id

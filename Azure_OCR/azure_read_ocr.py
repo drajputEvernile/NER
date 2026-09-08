@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import random
@@ -162,27 +163,29 @@ class AzureReadOcrExtractor:
         return self.settings.azure_configured
 
     def extract_page(self, image_path: Path, page_number: int) -> dict:
+        return self.extract_page_bytes(image_path.read_bytes(), image_path.name, page_number)
+
+    def extract_page_bytes(self, image_bytes: bytes, file_name: str, page_number: int) -> dict:
         if not self.available:
             raise RuntimeError("Azure Document Intelligence is not configured.")
         features = ["languages", "barcodes"]
-        logger.info("event=azure_read_page page=%s file=%s", page_number, image_path.name)
+        logger.info("event=azure_read_page page=%s file=%s", page_number, file_name)
         return page_from_azure(
-            self._call_read_model(image_path, features=features),
+            self._call_read_model(image_bytes, features=features),
             page_number,
-            image_path.name,
+            file_name,
         )
 
-    def _call_read_model(self, image_path: Path, *, features: list[str]) -> dict:
+    def _call_read_model(self, image_bytes: bytes, *, features: list[str]) -> dict:
         def request() -> dict:
             endpoint = (self.settings.azure_document_intelligence_endpoint or "").strip()
             key = (self.settings.azure_document_intelligence_key or "").strip()
             client = create_document_intelligence_client(endpoint, key)
-            with image_path.open("rb") as image_file:
-                poller = client.begin_analyze_document(
-                    "prebuilt-read",
-                    body=image_file,
-                    features=features,
-                )
+            poller = client.begin_analyze_document(
+                "prebuilt-read",
+                body=io.BytesIO(image_bytes),
+                features=features,
+            )
             result = await_poller(poller, self.settings.azure_poll_timeout_seconds)
             return result.as_dict() if hasattr(result, "as_dict") else json.loads(result.to_json())
 

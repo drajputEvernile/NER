@@ -1,8 +1,10 @@
-"""OCR images in place from RAW_Read_Path; write JSON to Azure Blob OCR_Processed.
+"""OCR images from Azure Blob raw prefix; write JSON to OCR_Processed.
 
 First run snapshots the folder count and name list. Later runs resume from the
 last unfinished record/page and skip anything already written in blob storage.
 
+Blob input:
+  {container}/Raw_Input/Run1/Batch2/Deid_Images/{record_id}/images...
 Blob output:
   {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
 
@@ -29,8 +31,6 @@ from azure_read_ocr import AzureReadOcrExtractor
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -47,20 +47,14 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def list_folders(root: Path) -> list[str]:
-    if not root.is_dir():
-        raise SystemExit(f"RAW_Read_Path is not a folder: {root}")
-    return sorted(path.name for path in root.iterdir() if path.is_dir())
-
-
-def list_pages(record_dir: Path) -> list[Path]:
-    if not record_dir.is_dir():
-        return []
-    return sorted(
-        path
-        for path in record_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in SUPPORTED
-    )
+def list_folders() -> list[str]:
+    folders = blob_store.list_raw_record_ids()
+    if not folders:
+        raise SystemExit(
+            f"No record folders under {blob_store.AZURE_STORAGE_CONTAINER}/"
+            f"{blob_store.AZURE_STORAGE_PREFIX}"
+        )
+    return folders
 
 
 def load_document(record_id: str) -> dict:
@@ -91,7 +85,8 @@ def done_file_names(document: dict) -> set[str]:
 
 def new_progress(folders: list[str]) -> dict:
     return {
-        "raw_read_path": str(azure_config.RAW_Read_Path),
+        "raw_blob_container": blob_store.AZURE_STORAGE_CONTAINER,
+        "raw_blob_prefix": blob_store.AZURE_STORAGE_PREFIX,
         "ocr_blob_container": blob_store.AZURE_STORAGE_CONTAINER,
         "ocr_blob_prefix": blob_store.AZURE_STORAGE_WRITE_PREFIX,
         "folder_count": len(folders),
@@ -110,20 +105,26 @@ def new_progress(folders: list[str]) -> dict:
 def load_progress() -> dict:
     path = azure_config.PROGRESS_FILE
     if not path.is_file():
-        folders = list_folders(azure_config.RAW_Read_Path)
+        folders = list_folders()
         progress = new_progress(folders)
         write_json(path, progress)
-        logger.info("first run: counted %s folders under %s", progress["folder_count"], azure_config.RAW_Read_Path)
+        logger.info(
+            "first run: counted %s folders under %s/%s",
+            progress["folder_count"],
+            blob_store.AZURE_STORAGE_CONTAINER,
+            blob_store.AZURE_STORAGE_PREFIX,
+        )
         return progress
 
     progress = read_json(path)
     same_paths = (
-        str(progress.get("raw_read_path") or "") == str(azure_config.RAW_Read_Path)
+        str(progress.get("raw_blob_container") or "") == blob_store.AZURE_STORAGE_CONTAINER
+        and str(progress.get("raw_blob_prefix") or "") == blob_store.AZURE_STORAGE_PREFIX
         and str(progress.get("ocr_blob_container") or "") == blob_store.AZURE_STORAGE_CONTAINER
         and str(progress.get("ocr_blob_prefix") or "") == blob_store.AZURE_STORAGE_WRITE_PREFIX
     )
     if not same_paths or not isinstance(progress.get("folders"), list):
-        folders = list_folders(azure_config.RAW_Read_Path)
+        folders = list_folders()
         progress = new_progress(folders)
         write_json(path, progress)
         logger.info("paths changed: new count %s folders", progress["folder_count"])
@@ -165,11 +166,8 @@ def ocr_record(record_id: str, folder_no: int, folder_count: int, progress: dict
     progress["current_record"] = record_id
     save_progress(progress)
 
-    source_dir = azure_config.record_source_dir(record_id)
-    if not source_dir.is_dir():
-        raise FileNotFoundError(f"Source record folder not found: {source_dir}")
-    images = list_pages(source_dir)
-    if not images:
+    pages = blob_store.list_raw_page_blobs(record_id)
+    if not pages:
         logger.info("skip %s (no page images)", record_id)
         _mark_completed(progress, record_id)
         return
@@ -179,33 +177,34 @@ def ocr_record(record_id: str, folder_no: int, folder_count: int, progress: dict
     progress["current_pages_done"] = sorted(already)
     save_progress(progress)
 
-    for page_number, image_path in enumerate(images, start=1):
-        if image_path.name in already:
+    for page_number, (file_name, blob_name) in enumerate(pages, start=1):
+        if file_name in already:
             logger.info(
                 "skip page %s/%s folder %s/%s record=%s file=%s",
                 page_number,
-                len(images),
+                len(pages),
                 folder_no,
                 folder_count,
                 record_id,
-                image_path.name,
+                file_name,
             )
             continue
         logger.info(
             "ocr page %s/%s folder %s/%s record=%s file=%s",
             page_number,
-            len(images),
+            len(pages),
             folder_no,
             folder_count,
             record_id,
-            image_path.name,
+            file_name,
         )
-        page = extractor.extract_page(image_path, page_number)
-        document["pages"] = [item for item in document["pages"] if item.get("fileName") != image_path.name]
+        image_bytes = blob_store.download_bytes(blob_name)
+        page = extractor.extract_page_bytes(image_bytes, file_name, page_number)
+        document["pages"] = [item for item in document["pages"] if item.get("fileName") != file_name]
         document["pages"].append(page)
         document["pages"].sort(key=lambda item: int(item.get("pageNumber") or 0))
         save_document(record_id, document)
-        already.add(image_path.name)
+        already.add(file_name)
         progress["current_pages_done"] = sorted(already)
         save_progress(progress)
 
@@ -224,6 +223,11 @@ def main() -> int:
     if not blob_store.storage_configured():
         raise SystemExit("Azure Blob Storage is not configured. Set AZURE_STORAGE_* in the repo-root .env")
 
+    logger.info(
+        "raw images <- %s/%s/{record}/...",
+        blob_store.AZURE_STORAGE_CONTAINER,
+        blob_store.AZURE_STORAGE_PREFIX,
+    )
     logger.info(
         "OCR JSON output -> %s/%s/{record}/{record}_final2.json",
         blob_store.AZURE_STORAGE_CONTAINER,
