@@ -19,7 +19,7 @@ gliner_medium = env_bool("GLINER_MEDIUM", True)
 gliner_low = env_bool("GLINER_LOW", True)
 distilroberta_base_ner = env_bool("DISTILROBERTA_BASE_NER", True)
 
-# blob = read OCR JSON from Azure Blob OCR_Processed
+# blob = read OCR JSON from Azure Blob (AZURE_STORAGE_WRITE_PREFIX)
 # local = existing Docling/Azure local OCR folders
 OCR_SOURCE = env_str("OCR_SOURCE", "blob").strip().casefold() or "blob"
 

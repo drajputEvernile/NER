@@ -195,7 +195,7 @@ def document_verified(page_verified: list[bool], page_numbers: list[int], total:
 def ocr_record(record_id: str, record_dir: Path | None = None) -> list[dict]:
     """Return OCR pages for a record.
 
-    When OCR_SOURCE=blob, pages come from Azure Blob OCR_Processed.
+    When OCR_SOURCE=blob, pages come from Azure Blob (AZURE_STORAGE_WRITE_PREFIX).
     Otherwise runs local Docling/Azure OCR and reads the local folder.
     """
     if mv_config.use_blob_ocr():

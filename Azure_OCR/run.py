@@ -1,12 +1,11 @@
-"""OCR images from Azure Blob raw prefix; write JSON to OCR_Processed.
+"""OCR images from Azure Blob raw prefix; write JSON to OCR write prefix.
 
 First run snapshots the folder count and name list. Later runs resume from the
 last unfinished record/page and skip anything already written in blob storage.
 
-Blob input:
-  {container}/Raw_Input/Run1/Batch2/Deid_Images/{record_id}/images...
-Blob output:
-  {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
+Prefixes come from repo-root .env:
+  AZURE_STORAGE_PREFIX
+  AZURE_STORAGE_WRITE_PREFIX
 
 Usage (from repo root):
   .\\.venv\\Scripts\\python.exe Azure_OCR\\run.py
@@ -222,6 +221,11 @@ def main() -> int:
         raise SystemExit("Azure Document Intelligence is not configured. Set endpoint and key in the repo-root .env")
     if not blob_store.storage_configured():
         raise SystemExit("Azure Blob Storage is not configured. Set AZURE_STORAGE_* in the repo-root .env")
+    try:
+        blob_store.require_raw_prefix()
+        blob_store.require_write_prefix()
+    except RuntimeError as err:
+        raise SystemExit(str(err)) from err
 
     logger.info(
         "raw images <- %s/%s/{record}/...",

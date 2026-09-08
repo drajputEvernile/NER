@@ -1,11 +1,7 @@
 """Standalone Azure OCR paths and credentials.
 
-Reads record images from Azure Blob Storage under AZURE_STORAGE_PREFIX.
-Writes OCR JSON to Azure Blob Storage under OCR_Processed/Batch1/Final2.
-
-Blob layout:
-  {container}/Raw_Input/Run1/Batch2/Deid_Images/{record_id}/images...
-  {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
+Reads record images from Azure Blob (AZURE_STORAGE_PREFIX in .env).
+Writes OCR JSON to Azure Blob (AZURE_STORAGE_WRITE_PREFIX in .env).
 
 Secrets and storage settings come from the repo-root .env.
 """
@@ -49,11 +45,4 @@ _load_repo_env()
 AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT = (os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT") or "").strip()
 AZURE_DOCUMENT_INTELLIGENCE_KEY = (os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY") or "").strip()
 AZURE_POLL_TIMEOUT_SECONDS = int((os.environ.get("AZURE_POLL_TIMEOUT_SECONDS") or str(AZURE_POLL_TIMEOUT_SECONDS)).strip() or 180)
-
-AZURE_STORAGE_PREFIX = (
-    os.environ.get("AZURE_STORAGE_PREFIX") or "Raw_Input/Run1/Batch2/Deid_Images"
-).strip().strip("/")
-AZURE_STORAGE_WRITE_PREFIX = (
-    os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed/Batch1/Final2"
-).strip().strip("/")
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()

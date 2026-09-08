@@ -2,9 +2,9 @@
 
 Used by Azure_OCR (read raw images + write OCR JSON) and Member Verification (read OCR JSON).
 
-Blob layout:
-  {container}/Raw_Input/Run1/Batch2/Deid_Images/{record_id}/images...
-  {container}/OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
+Blob path prefixes come only from the repo-root .env:
+  AZURE_STORAGE_PREFIX       — raw record image folders
+  AZURE_STORAGE_WRITE_PREFIX — OCR JSON output / Member Verification OCR read
 """
 
 from __future__ import annotations
@@ -42,14 +42,8 @@ AZURE_STORAGE_CONNECTION_STRING = (os.environ.get("AZURE_STORAGE_CONNECTION_STRI
 AZURE_STORAGE_ACCOUNT_NAME = (os.environ.get("AZURE_STORAGE_ACCOUNT_NAME") or "").strip()
 AZURE_STORAGE_ACCOUNT_KEY = (os.environ.get("AZURE_STORAGE_ACCOUNT_KEY") or "").strip()
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
-# Raw images: Raw_Input/Run1/Batch2/Deid_Images/{record_id}/...
-AZURE_STORAGE_PREFIX = (
-    os.environ.get("AZURE_STORAGE_PREFIX") or "Raw_Input/Run1/Batch2/Deid_Images"
-).strip().strip("/")
-# OCR JSON root: OCR_Processed/Batch1/Final2/{record_id}/{record_id}_final2.json
-AZURE_STORAGE_WRITE_PREFIX = (
-    os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "OCR_Processed/Batch1/Final2"
-).strip().strip("/")
+AZURE_STORAGE_PREFIX = (os.environ.get("AZURE_STORAGE_PREFIX") or "").strip().strip("/")
+AZURE_STORAGE_WRITE_PREFIX = (os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "").strip().strip("/")
 
 OCR_JSON_SUFFIX = "_final2.json"
 
@@ -66,6 +60,18 @@ def storage_configured() -> bool:
     if AZURE_STORAGE_CONNECTION_STRING:
         return True
     return bool(AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY)
+
+
+def require_raw_prefix() -> str:
+    if not AZURE_STORAGE_PREFIX:
+        raise RuntimeError("AZURE_STORAGE_PREFIX is required in the repo-root .env")
+    return AZURE_STORAGE_PREFIX
+
+
+def require_write_prefix() -> str:
+    if not AZURE_STORAGE_WRITE_PREFIX:
+        raise RuntimeError("AZURE_STORAGE_WRITE_PREFIX is required in the repo-root .env")
+    return AZURE_STORAGE_WRITE_PREFIX
 
 
 def _entra_credential():
@@ -123,7 +129,7 @@ def container_client():
 
 
 def record_ocr_blob_name(record_id: str) -> str:
-    prefix = AZURE_STORAGE_WRITE_PREFIX
+    prefix = require_write_prefix()
     return f"{prefix}/{record_id}/{record_id}{OCR_JSON_SUFFIX}"
 
 
@@ -152,24 +158,26 @@ def _list_record_ids_under(prefix: str) -> list[str]:
 
 
 def list_raw_record_ids() -> list[str]:
-    """Record folders under Raw_Input/.../Deid_Images."""
-    record_ids = _list_record_ids_under(AZURE_STORAGE_PREFIX)
+    """Record folders under AZURE_STORAGE_PREFIX."""
+    prefix = require_raw_prefix()
+    record_ids = _list_record_ids_under(prefix)
     logger.info(
         "blob raw records container=%s prefix=%s count=%s",
         AZURE_STORAGE_CONTAINER,
-        AZURE_STORAGE_PREFIX,
+        prefix,
         len(record_ids),
     )
     return record_ids
 
 
 def list_ocr_record_ids() -> list[str]:
-    """Record folders under OCR_Processed/Batch1/Final2."""
-    record_ids = _list_record_ids_under(AZURE_STORAGE_WRITE_PREFIX)
+    """Record folders under AZURE_STORAGE_WRITE_PREFIX."""
+    prefix = require_write_prefix()
+    record_ids = _list_record_ids_under(prefix)
     logger.info(
         "blob OCR records container=%s prefix=%s count=%s",
         AZURE_STORAGE_CONTAINER,
-        AZURE_STORAGE_WRITE_PREFIX,
+        prefix,
         len(record_ids),
     )
     return record_ids
@@ -178,7 +186,7 @@ def list_ocr_record_ids() -> list[str]:
 def list_raw_page_blobs(record_id: str) -> list[tuple[str, str]]:
     """Return sorted (file_name, blob_name) image pages for a raw record folder."""
     client = container_client()
-    base = f"{AZURE_STORAGE_PREFIX}/{record_id}/"
+    base = f"{require_raw_prefix()}/{record_id}/"
     pages: list[tuple[str, str]] = []
     for blob in client.list_blobs(name_starts_with=base):
         name = str(blob.name or "")
