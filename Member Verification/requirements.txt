@@ -1,0 +1,9 @@
+# Member Verification — blob OCR JSON read + rule/NER verification
+pandas>=2.2.0
+gliner>=0.2.21
+sentencepiece>=0.2.0
+transformers>=4.51.3,<5.14.0
+huggingface_hub>=0.26.0
+azure-storage-blob>=12.19.0
+azure-identity>=1.17.0
+azure-core>=1.30.0
