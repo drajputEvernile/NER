@@ -52,8 +52,12 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def build_queue() -> tuple[list[dict], int]:
-    """Tally every record folder and page count under the raw prefix."""
+def build_queue() -> tuple[list[dict], int, list[str]]:
+    """Tally every record folder and page count under the raw prefix.
+
+    Records whose OCR JSON already has every raw page are marked done so they
+    are not sent to Azure again (even if progress was built after OCR finished).
+    """
     folders = blob_store.list_raw_record_ids()
     if not folders:
         raise SystemExit(
@@ -61,26 +65,50 @@ def build_queue() -> tuple[list[dict], int]:
             f"{blob_store.require_raw_prefix()}"
         )
     queue: list[dict] = []
+    completed: list[str] = []
     total_pages = 0
+    already_done = 0
     for index, record_id in enumerate(folders, start=1):
         pages = blob_store.list_raw_page_blobs(record_id)
         page_count = len(pages)
         total_pages += page_count
+        raw_names = {name for name, _blob in pages}
+        existing = blob_store.load_ocr_document(record_id)
+        done_names: set[str] = set()
+        if isinstance(existing, dict):
+            for page in existing.get("pages") or []:
+                name = str(page.get("fileName") or "").strip()
+                if name:
+                    done_names.add(name)
+        is_complete = bool(raw_names) and raw_names <= done_names
+        if not raw_names:
+            # Empty raw folder: nothing to OCR.
+            is_complete = True
+        status = "done" if is_complete else "pending"
+        if is_complete:
+            already_done += 1
+            completed.append(record_id)
         queue.append(
             {
                 "recordId": record_id,
                 "pageCount": page_count,
-                "status": "pending",
-                "pages_done": [],
+                "status": status,
+                "pages_done": sorted(done_names & raw_names) if raw_names else [],
                 "error": None,
             }
         )
         if index % 25 == 0 or index == len(folders):
-            logger.info("tally progress %s/%s folders (pages so far=%s)", index, len(folders), total_pages)
-    return queue, total_pages
+            logger.info(
+                "tally progress %s/%s folders (pages so far=%s, already_done=%s)",
+                index,
+                len(folders),
+                total_pages,
+                already_done,
+            )
+    return queue, total_pages, completed
 
 
-def new_progress(queue: list[dict], total_pages: int) -> dict:
+def new_progress(queue: list[dict], total_pages: int, completed: list[str] | None = None) -> dict:
     return {
         "raw_blob_container": blob_store.AZURE_STORAGE_CONTAINER,
         "raw_blob_prefix": blob_store.require_raw_prefix(),
@@ -91,7 +119,7 @@ def new_progress(queue: list[dict], total_pages: int) -> dict:
         "parallel_records": azure_config.PARALLEL_RECORDS,
         "max_azure_requests": azure_config.MAX_AZURE_REQUESTS,
         "queue": queue,
-        "completed": [],
+        "completed": list(completed or []),
         "started_at": utc_now(),
         "updated_at": utc_now(),
         "status": "running",
@@ -102,13 +130,14 @@ def load_progress() -> dict:
     path = azure_config.PROGRESS_FILE
     if not path.is_file():
         logger.info("building OCR queue from raw prefix...")
-        queue, total_pages = build_queue()
-        progress = new_progress(queue, total_pages)
+        queue, total_pages, completed = build_queue()
+        progress = new_progress(queue, total_pages, completed)
         write_json(path, progress)
         logger.info(
-            "first run: folders=%s pages=%s under %s/%s",
+            "first run: folders=%s pages=%s already_done=%s under %s/%s",
             progress["folder_count"],
             progress["page_count_total"],
+            len(completed),
             blob_store.AZURE_STORAGE_CONTAINER,
             blob_store.require_raw_prefix(),
         )
@@ -123,10 +152,15 @@ def load_progress() -> dict:
     )
     if not same_paths or not isinstance(progress.get("queue"), list):
         logger.info("paths changed or queue missing: rebuilding tally...")
-        queue, total_pages = build_queue()
-        progress = new_progress(queue, total_pages)
+        queue, total_pages, completed = build_queue()
+        progress = new_progress(queue, total_pages, completed)
         write_json(path, progress)
-        logger.info("new queue: folders=%s pages=%s", progress["folder_count"], progress["page_count_total"])
+        logger.info(
+            "new queue: folders=%s pages=%s already_done=%s",
+            progress["folder_count"],
+            progress["page_count_total"],
+            len(completed),
+        )
         return progress
 
     # Interrupted "running" items go back to pending so they can resume.
