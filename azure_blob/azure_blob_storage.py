@@ -3,8 +3,8 @@
 Used by Azure_OCR (read raw images + write OCR JSON) and Member Verification (read OCR JSON).
 
 Blob path prefixes come only from the repo-root .env:
-  AZURE_STORAGE_PREFIX       — raw record image folders
-  AZURE_STORAGE_WRITE_PREFIX — OCR JSON output / Member Verification OCR read
+  AZURE_OCR_RAW_STORAGE_PREFIX   — raw record image folders
+  AZURE_OCR_STORAGE_WRITE_PREFIX — OCR JSON output / Member Verification OCR read
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ AZURE_STORAGE_CONNECTION_STRING = (os.environ.get("AZURE_STORAGE_CONNECTION_STRI
 AZURE_STORAGE_ACCOUNT_NAME = (os.environ.get("AZURE_STORAGE_ACCOUNT_NAME") or "").strip()
 AZURE_STORAGE_ACCOUNT_KEY = (os.environ.get("AZURE_STORAGE_ACCOUNT_KEY") or "").strip()
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
-AZURE_STORAGE_PREFIX = (os.environ.get("AZURE_STORAGE_PREFIX") or "").strip().strip("/")
-AZURE_STORAGE_WRITE_PREFIX = (os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "").strip().strip("/")
+AZURE_OCR_RAW_STORAGE_PREFIX = (os.environ.get("AZURE_OCR_RAW_STORAGE_PREFIX") or "").strip().strip("/")
+AZURE_OCR_STORAGE_WRITE_PREFIX = (os.environ.get("AZURE_OCR_STORAGE_WRITE_PREFIX") or "").strip().strip("/")
 
 OCR_JSON_SUFFIX = "_final2.json"
 
@@ -90,15 +90,15 @@ def storage_configured() -> bool:
 
 
 def require_raw_prefix() -> str:
-    if not AZURE_STORAGE_PREFIX:
-        raise RuntimeError("AZURE_STORAGE_PREFIX is required in the repo-root .env")
-    return AZURE_STORAGE_PREFIX
+    if not AZURE_OCR_RAW_STORAGE_PREFIX:
+        raise RuntimeError("AZURE_OCR_RAW_STORAGE_PREFIX is required in the repo-root .env")
+    return AZURE_OCR_RAW_STORAGE_PREFIX
 
 
 def require_write_prefix() -> str:
-    if not AZURE_STORAGE_WRITE_PREFIX:
-        raise RuntimeError("AZURE_STORAGE_WRITE_PREFIX is required in the repo-root .env")
-    return AZURE_STORAGE_WRITE_PREFIX
+    if not AZURE_OCR_STORAGE_WRITE_PREFIX:
+        raise RuntimeError("AZURE_OCR_STORAGE_WRITE_PREFIX is required in the repo-root .env")
+    return AZURE_OCR_STORAGE_WRITE_PREFIX
 
 
 def _entra_credential():
@@ -185,7 +185,7 @@ def _list_record_ids_under(prefix: str) -> list[str]:
 
 
 def list_raw_record_ids() -> list[str]:
-    """Record folders under AZURE_STORAGE_PREFIX."""
+    """Record folders under AZURE_OCR_RAW_STORAGE_PREFIX."""
     prefix = require_raw_prefix()
     record_ids = _list_record_ids_under(prefix)
     logger.info(
@@ -198,7 +198,7 @@ def list_raw_record_ids() -> list[str]:
 
 
 def list_ocr_record_ids() -> list[str]:
-    """Record folders under AZURE_STORAGE_WRITE_PREFIX."""
+    """Record folders under AZURE_OCR_STORAGE_WRITE_PREFIX."""
     prefix = require_write_prefix()
     record_ids = _list_record_ids_under(prefix)
     logger.info(

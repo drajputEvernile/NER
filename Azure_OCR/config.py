@@ -1,9 +1,8 @@
-"""Standalone Azure OCR paths and credentials.
+"""Standalone Azure OCR credentials and progress path.
 
-Reads record images from Azure Blob (AZURE_STORAGE_PREFIX in .env).
-Writes OCR JSON to Azure Blob (AZURE_STORAGE_WRITE_PREFIX in .env).
-
-Secrets and storage settings come from the repo-root .env.
+Raw / write blob prefixes come only from the repo-root .env:
+  AZURE_OCR_RAW_STORAGE_PREFIX
+  AZURE_OCR_STORAGE_WRITE_PREFIX
 """
 
 from __future__ import annotations
@@ -14,18 +13,19 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
-SRC = REPO_ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 if str(REPO_ROOT / "azure_blob") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "azure_blob"))
 
-# Local progress file only (resume state). Images + OCR JSON live in blob storage.
+# Local progress + queue file only. Images + OCR JSON live in blob storage.
 PROGRESS_FILE = HERE / "azure_ocr_progress.json"
 
 OCR_JSON_SUFFIX = "_final2.json"
 
 AZURE_POLL_TIMEOUT_SECONDS = 180
+# Up to this many record folders processed at once.
+PARALLEL_RECORDS = 10
+# Hard cap on concurrent Azure Document Intelligence requests.
+MAX_AZURE_REQUESTS = 14
 
 
 def _load_repo_env() -> None:
@@ -46,3 +46,5 @@ AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT = (os.environ.get("AZURE_DOCUMENT_INTELLIGE
 AZURE_DOCUMENT_INTELLIGENCE_KEY = (os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY") or "").strip()
 AZURE_POLL_TIMEOUT_SECONDS = int((os.environ.get("AZURE_POLL_TIMEOUT_SECONDS") or str(AZURE_POLL_TIMEOUT_SECONDS)).strip() or 180)
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
+PARALLEL_RECORDS = int((os.environ.get("AZURE_OCR_PARALLEL_RECORDS") or str(PARALLEL_RECORDS)).strip() or 10)
+MAX_AZURE_REQUESTS = int((os.environ.get("AZURE_OCR_MAX_REQUESTS") or str(MAX_AZURE_REQUESTS)).strip() or 14)
