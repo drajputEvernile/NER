@@ -47,6 +47,17 @@ def _relink(path: Path) -> None:
     relink_local_paths(path)
 
 
+def weights_present(model_id: str) -> bool:
+    """True when the checkpoint for this model is on disk and loadable."""
+    spec = by_id(model_id)
+    return _looks_like_model(model_dir(spec), spec["kind"])
+
+
+def missing_weights(model_ids: list[str]) -> list[str]:
+    """Enabled models whose checkpoints are not downloaded."""
+    return [model_id for model_id in model_ids if not weights_present(model_id)]
+
+
 def use_model(model_id: str) -> None:
     global _ACTIVE_ID
     if model_id != _ACTIVE_ID:

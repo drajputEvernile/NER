@@ -9,6 +9,11 @@ Models/gliner_large-v2.1/
 Models/gliner_medium-v2.1/
 Models/gliner_low/
 
+# Local queue / progress + batch staging
+Azure_OCR/azure_ocr_progress.json
+Member_Verification/mv_progress.json
+Member_Verification/mv_staging/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -86,6 +86,7 @@ BOTH_FULL = "both_full"
 INITIAL = "initial"
 MISMATCH = "mismatch"
 NONE = "none"
+ONE_FULL_WRONG = "one_full_wrong"
 ALL_FULL = "all_full"
 TWO_FULL = "two_full"
 TWO_FULL_WRONG = "two_full_wrong"
@@ -152,8 +153,12 @@ def classify_two_word_name(span: list[str], first: str, last: str) -> str:
         return BOTH_FULL
     if (first_full and last_init) or (first_init and last_full):
         if extras:
-            return MISMATCH
+            return ONE_FULL_WRONG
         return INITIAL
+    if (first_full or last_full) and extras:
+        # One of the two names matches and another full name sits beside it:
+        # a different member, not merely a missing detection.
+        return ONE_FULL_WRONG
     return MISMATCH
 
 

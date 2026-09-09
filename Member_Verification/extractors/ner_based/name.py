@@ -1,10 +1,10 @@
-"""Second-pass person names from NER on patient-name key windows."""
+"""Second-pass person names from NER on the sentence around a patient-name key."""
 
 from __future__ import annotations
 
 import re
 
-from .keys import key_windows
+from .keys import key_sentences
 from .model import predict_entities
 from ..rule_based.name_common import is_ignore, name_matches, tokenize
 
@@ -56,7 +56,7 @@ def _keep_hit(name: str) -> bool:
     return name.casefold() not in _GENERIC
 
 
-def _merge_person_hits(window: str, hits: list[dict]) -> list[tuple[float, str]]:
+def _merge_person_hits(sentence: str, hits: list[dict]) -> list[tuple[float, str]]:
     spans: list[tuple[int, int, float, str]] = []
     for hit in hits:
         name = _clean(str(hit.get("text") or ""))
@@ -83,12 +83,47 @@ def _merge_person_hits(window: str, hits: list[dict]) -> list[tuple[float, str]]
         both_one = _name_token_count(prev_name) == 1 and _name_token_count(name) == 1
         if adjacent or (both_one and start >= 0 and prev_end >= 0 and start <= prev_end + 8):
             stop = max(prev_end, end)
-            piece = _clean(window[prev_start:stop]) if prev_start >= 0 and stop > prev_start else ""
+            piece = _clean(sentence[prev_start:stop]) if prev_start >= 0 and stop > prev_start else ""
             joined = piece if _name_token_count(piece) >= 2 else _clean(f"{prev_name} {name}")
             merged[-1] = (prev_start, stop, max(prev_score, score), joined)
         else:
             merged.append((start, end, score, name))
     return [(score, name) for _start, _end, score, name in merged if _is_full_name(name)]
+
+
+def name_candidates(ocr_text: str, model_id: str | None = None) -> list[tuple[float, str, str]]:
+    """Run NER on each patient-name sentence; return (score, name, key).
+
+    The sentence is real page text around the key ("Patient Name: Robert
+    Smith"), not a rebuilt token window, so the model reads it the way it was
+    written. Every person the model returns is reported, whether or not it is
+    the expected member, so the caller can also spot a wrong member.
+    """
+    people: list[tuple[float, str, str]] = []
+    for key, sentence in key_sentences(ocr_text, "patient_name"):
+        for score, name in _merge_person_hits(
+            sentence,
+            predict_entities(sentence, PERSON_LABELS, model_id=model_id, value_source=key),
+        ):
+            people.append((score, name, key))
+    people.sort(key=lambda item: item[0], reverse=True)
+    return people
+
+
+def pick_name(
+    people: list[tuple[float, str, str]],
+    first_name: str,
+    last_name: str,
+    middle_name: str = "",
+    name_mode: str = "2",
+) -> tuple[str, str]:
+    """Best candidate: one that verifies as the member, else the top hit."""
+    if not people:
+        return "N/A", ""
+    for _score, name, key in people:
+        if name_matches(name, first_name, last_name, middle_name, name_mode):
+            return name, key
+    return people[0][1], people[0][2]
 
 
 def extract_name_ner(
@@ -100,17 +135,5 @@ def extract_name_ner(
     model_id: str | None = None,
 ) -> tuple[str, str]:
     """Return (detected_name, key_used)."""
-    people: list[tuple[float, str, str]] = []
-    for key, window in key_windows(ocr_text, "patient_name"):
-        for score, name in _merge_person_hits(
-            window,
-            predict_entities(window, PERSON_LABELS, model_id=model_id, value_source=key),
-        ):
-            people.append((score, name, key))
-    if not people:
-        return "N/A", ""
-    people.sort(key=lambda item: item[0], reverse=True)
-    for _score, name, key in people:
-        if name_matches(name, first_name, last_name, middle_name, name_mode):
-            return name, key
-    return people[0][1], people[0][2]
+    people = name_candidates(ocr_text, model_id)
+    return pick_name(people, first_name, last_name, middle_name, name_mode)

@@ -1,7 +1,9 @@
 """Member verification paths and NER model toggles.
 
 OCR pages come from Azure Blob (AZURE_OCR_STORAGE_WRITE_PREFIX in .env).
-Output folders use absolute paths set below (or via .env overrides).
+One absolute output root is configured (MV_OUTPUT_PATH). Each run writes a
+single batch folder named after the end timestamp of the operation, holding
+one member-verification CSV and one NER CSV per model for the whole batch.
 
 Loads repo-root .env the same way Azure_OCR does (no env_loader dependency).
 """
@@ -67,11 +69,18 @@ MAX_PAGES = _env_int("MAX_PAGES", 10)
 System_Input_path = Path(
     _env_str("MV_SYSTEM_INPUT_PATH") or r"E:\Projects\NER\Data\Raw\system_input.csv"
 )
-MV_Output_path = Path(_env_str("MV_OUTPUT_PATH") or r"E:\Projects\NER\Data\output")
-NER_Output_path = Path(_env_str("NER_OUTPUT_PATH") or r"E:\Projects\NER\Data\output")
 
-MV_Output_Folder = "member_verification"
-NER_Output_Folder = "ner"
+# Single output root for both member-verification and NER CSVs.
+Output_path = Path(_env_str("MV_OUTPUT_PATH") or r"E:\Projects\NER\Data\output")
+
+# Queue + progress for the verification batch, and the staging area rows are
+# appended to while the queue runs.
+PROGRESS_FILE = HERE / "mv_progress.json"
+STAGING_DIR = HERE / "mv_staging"
+
+BATCH_STAMP_FORMAT = "%Y%m%d_%H%M%S"
+MV_CSV_PREFIX = "member_verification"
+NER_CSV_PREFIX = "ner"
 
 _MODEL_FLAGS = (
     ("gliner_large", gliner_large),
@@ -84,9 +93,13 @@ def enabled_model_ids() -> list[str]:
     return [model_id for model_id, on in _MODEL_FLAGS if on]
 
 
-def record_mv_output_dir(record_id: str) -> Path:
-    return MV_Output_path / record_id / MV_Output_Folder
+def batch_output_dir(stamp: str) -> Path:
+    return Output_path / stamp
 
 
-def record_ner_output_dir(record_id: str) -> Path:
-    return NER_Output_path / record_id / NER_Output_Folder
+def mv_csv_name(model_id: str) -> str:
+    return f"{MV_CSV_PREFIX}_{model_id}.csv"
+
+
+def ner_csv_name(model_id: str) -> str:
+    return f"{NER_CSV_PREFIX}_{model_id}.csv"

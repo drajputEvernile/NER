@@ -1,7 +1,14 @@
 """Rule-based + GLiNER member verification.
 
 OCR pages come from Azure Blob (AZURE_OCR_STORAGE_WRITE_PREFIX in .env).
-CSV outputs go under absolute MV_OUTPUT_PATH / NER_OUTPUT_PATH from config.
+
+Builds a queue in mv_progress.json (record tally under the OCR prefix), then
+processes one record at a time. Rows are appended to per-model staging CSVs as
+records finish, and at the end of the run the whole batch is written into one
+folder named after the end timestamp under the single MV_OUTPUT_PATH root:
+
+  {MV_OUTPUT_PATH}/{YYYYMMDD_HHMMSS}/member_verification_{model}.csv
+  {MV_OUTPUT_PATH}/{YYYYMMDD_HHMMSS}/ner_{model}.csv
 
 Usage (from repo root):
   .\\.venv\\Scripts\\python.exe Member_Verification\\run.py
@@ -13,8 +20,11 @@ Download NER models:
 from __future__ import annotations
 
 import csv
+import json
 import logging
+import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -32,13 +42,12 @@ import config as mv_config
 sys.path.insert(0, str(HERE / "Rules"))
 
 from extractors.ner_based.dob import extract_dob_ner
-from extractors.ner_based.log import COLUMNS as NER_COLUMNS
+from extractors.ner_based.log import COLUMNS as _NER_LOG_COLUMNS
 from extractors.ner_based.log import reset as reset_ner_log
 from extractors.ner_based.log import rows as ner_log_rows
 from extractors.ner_based.member_id import extract_member_id_ner
-from extractors.ner_based.model import unload as unload_ner_model
-from extractors.ner_based.model import use_model
-from extractors.ner_based.name import extract_name_ner
+from extractors.ner_based.model import missing_weights, use_model
+from extractors.ner_based.name import name_candidates, pick_name
 from extractors.ner_based.ner_models.catalog import by_id
 from extractors.rule_based.dob import extract_dob
 from extractors.rule_based.member_id import extract_member_id
@@ -47,7 +56,16 @@ from extractors.rule_based.name_3_words import extract_name_3_words
 from base_rules import is_present
 from name_2_words_rules import verify_two_word_name
 from name_3_words_rules import verify_three_word_name
-from what_if_rules import apply_what_if
+from wrong_member_rules import wrong_member_on_page
+from what_if_rules import (
+    PAGE_NOT_VERIFIED,
+    PAGE_VERIFIED,
+    PAGE_WRONG_MEMBER,
+    apply_what_if,
+    count_wrong_member,
+    page_status,
+    reject_threshold,
+)
 import azure_blob_storage as blob_store
 
 COLUMNS = [
@@ -68,6 +86,253 @@ COLUMNS = [
     "Page_Detection_Correct",
     "Page_Detection_InCorrect",
 ]
+
+# The batch NER CSV merges every record, so each row is stamped with where it
+# came from before the log's own columns.
+NER_COLUMNS = ["RecordId", "Page_No", *_NER_LOG_COLUMNS]
+
+MEMBER_KIND = "member"
+NER_KIND = "ner"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+# --- queue / progress --------------------------------------------------------
+
+
+def queue_identity(mode: str, model_ids: list[str], container: str, prefix: str) -> dict:
+    """Settings the queue is tied to; a change here rebuilds the tally."""
+    return {
+        "ocr_blob_container": container,
+        "ocr_blob_prefix": prefix,
+        "system_input": str(mv_config.System_Input_path),
+        "output_path": str(mv_config.Output_path),
+        "models": list(model_ids),
+        "mode": mode,
+        "max_pages": int(mv_config.MAX_PAGES) if mode == "selected" else None,
+    }
+
+
+def build_queue(record_ids: list[str]) -> list[dict]:
+    """Tally every record folder under the OCR prefix that is in system input.
+
+    Page counts are not fetched here: that would download every OCR JSON twice,
+    so each item gets its pageCount filled in when the record is processed.
+    """
+    return [
+        {
+            "recordId": record_id,
+            "pageCount": None,
+            "status": "pending",
+            "models_done": [],
+            "error": None,
+        }
+        for record_id in record_ids
+    ]
+
+
+def new_progress(
+    record_ids: list[str],
+    mode: str,
+    model_ids: list[str],
+    container: str,
+    prefix: str,
+) -> dict:
+    queue = build_queue(record_ids)
+    return {
+        **queue_identity(mode, model_ids, container, prefix),
+        "record_count": len(queue),
+        "queue": queue,
+        "completed": [],
+        "skipped": [],
+        "started_at": utc_now(),
+        "updated_at": utc_now(),
+        "status": "running",
+    }
+
+
+def load_progress(
+    record_ids: list[str],
+    mode: str,
+    model_ids: list[str],
+    container: str,
+    prefix: str,
+) -> dict:
+    path = mv_config.PROGRESS_FILE
+    identity = queue_identity(mode, model_ids, container, prefix)
+
+    if not path.is_file():
+        logger.info("building verification queue from %s/%s ...", container, prefix)
+        progress = new_progress(record_ids, mode, model_ids, container, prefix)
+        write_json(path, progress)
+        logger.info("first run: records=%s mode=%s", progress["record_count"], mode)
+        return progress
+
+    progress = read_json(path)
+    same_settings = isinstance(progress.get("queue"), list) and all(
+        progress.get(key) == value for key, value in identity.items()
+    )
+    if not same_settings:
+        logger.info("settings changed or queue missing: rebuilding tally...")
+        clear_staging()
+        progress = new_progress(record_ids, mode, model_ids, container, prefix)
+        write_json(path, progress)
+        logger.info("new queue: records=%s mode=%s", progress["record_count"], mode)
+        return progress
+
+    known = {str(item.get("recordId") or "") for item in progress["queue"]}
+    added = [record_id for record_id in record_ids if record_id not in known]
+    if added:
+        progress["queue"].extend(build_queue(added))
+        progress["record_count"] = len(progress["queue"])
+        logger.info("queue grew by %s new record(s)", len(added))
+
+    for item in progress["queue"]:
+        if str(item.get("status") or "") == "running":
+            item["status"] = "pending"
+    progress["status"] = "running"
+    save_progress(progress)
+    done = sum(1 for item in progress["queue"] if item.get("status") == "done")
+    logger.info("resume: %s/%s records done", done, progress.get("record_count"))
+    return progress
+
+
+def save_progress(progress: dict) -> None:
+    progress["updated_at"] = utc_now()
+    write_json(mv_config.PROGRESS_FILE, progress)
+
+
+def _queue_item(progress: dict, record_id: str) -> dict | None:
+    for item in progress.get("queue") or []:
+        if item.get("recordId") == record_id:
+            return item
+    return None
+
+
+def _set_item_status(progress: dict, record_id: str, status: str, **extra) -> None:
+    item = _queue_item(progress, record_id)
+    if item is None:
+        return
+    item["status"] = status
+    for key, value in extra.items():
+        item[key] = value
+    if status in {"done", "skipped"}:
+        key = "completed" if status == "done" else "skipped"
+        bucket = list(progress.get(key) or [])
+        if record_id not in bucket:
+            bucket.append(record_id)
+        progress[key] = bucket
+    save_progress(progress)
+
+
+def _mark_model_done(progress: dict, record_id: str, model_id: str) -> None:
+    item = _queue_item(progress, record_id)
+    if item is None:
+        return
+    done = list(item.get("models_done") or [])
+    if model_id not in done:
+        done.append(model_id)
+    item["models_done"] = done
+    save_progress(progress)
+
+
+def _models_done(progress: dict, record_id: str) -> set[str]:
+    item = _queue_item(progress, record_id)
+    if item is None:
+        return set()
+    return {str(model_id) for model_id in (item.get("models_done") or [])}
+
+
+def pending_records(progress: dict) -> list[str]:
+    return [
+        str(item.get("recordId") or "")
+        for item in progress.get("queue") or []
+        if item.get("status") in {"pending", "error", "running"} and item.get("recordId")
+    ]
+
+
+def queue_counts(progress: dict) -> dict[str, int]:
+    tally: dict[str, int] = {}
+    for item in progress.get("queue") or []:
+        status = str(item.get("status") or "pending")
+        tally[status] = tally.get(status, 0) + 1
+    return tally
+
+
+# --- batch CSV staging -------------------------------------------------------
+
+
+def staging_path(kind: str, model_id: str) -> Path:
+    return mv_config.STAGING_DIR / f"{kind}_{model_id}.csv"
+
+
+def clear_staging() -> None:
+    if mv_config.STAGING_DIR.is_dir():
+        shutil.rmtree(mv_config.STAGING_DIR, ignore_errors=True)
+
+
+def append_rows(kind: str, model_id: str, columns: list[str], rows: list[dict]) -> None:
+    """Append one record's rows to the staged batch CSV for this model.
+
+    Called once per record and model even when there is nothing to add, so the
+    file is created with its header regardless: a batch folder always carries
+    the same set of CSVs, and an empty NER file reads as "no hits" rather than
+    as a missing file.
+    """
+    path = staging_path(kind, model_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.is_file() or path.stat().st_size == 0
+    with path.open("a", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def staged_files() -> list[Path]:
+    if not mv_config.STAGING_DIR.is_dir():
+        return []
+    return sorted(path for path in mv_config.STAGING_DIR.glob("*.csv") if path.is_file())
+
+
+def finalize_batch(stamp: str | None = None) -> Path | None:
+    """Move staged CSVs into one batch folder named after the end timestamp."""
+    files = staged_files()
+    if not files:
+        logger.info("nothing staged: no batch folder written")
+        return None
+    stamp = stamp or datetime.now().strftime(mv_config.BATCH_STAMP_FORMAT)
+    batch_dir = mv_config.batch_output_dir(stamp)
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        kind, _, model_id = path.stem.partition("_")
+        name = (
+            mv_config.ner_csv_name(model_id)
+            if kind == NER_KIND
+            else mv_config.mv_csv_name(model_id)
+        )
+        target = batch_dir / name
+        shutil.move(str(path), str(target))
+        logger.info("wrote %s", target)
+    clear_staging()
+    return batch_dir
+
+
+# --- verification ------------------------------------------------------------
 
 
 def page_text(page: dict) -> str:
@@ -124,18 +389,26 @@ def extract_page_fields(
     expected: dict[str, str],
     name_mode: str,
     model_id: str,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], list[str]]:
+    """Return (page fields, people NER read from the patient-name sentences).
+
+    NER runs once per page over the sentence around each patient-name key. Its
+    people are used for the name when the rule-based pass found nothing, and
+    always for deciding whether the page carries a wrong member.
+    """
+    people = name_candidates(ocr_text, model_id)
+    ner_names = [name for _score, name, _key in people]
+
     name = extract_full_name_rule(ocr_text, expected, name_mode)
     if is_present(name):
         name_source, name_key = "rule based", ""
     else:
-        name, name_key = extract_name_ner(
-            ocr_text,
+        name, name_key = pick_name(
+            people,
             expected["DummyFirstName"],
             expected["DummyLastName"],
             expected["DummyMiddleName"],
             name_mode,
-            model_id,
         )
         name_source = "ner" if is_present(name) else ""
         if not is_present(name):
@@ -159,7 +432,7 @@ def extract_page_fields(
         if not is_present(member_id):
             id_key = ""
 
-    return {
+    fields = {
         "Detected_Full_Name": name,
         "Detection_Source_Name": name_source,
         "ner_key_source_Name": name_key,
@@ -170,6 +443,7 @@ def extract_page_fields(
         "Detection_Source_MemberID": id_source,
         "ner_key_source_MemberID": id_key,
     }
+    return fields, ner_names
 
 
 def verify_page(expected: dict[str, str], name_mode: str, found_name: str, dob: str, member_id: str) -> bool:
@@ -197,12 +471,30 @@ def verify_page(expected: dict[str, str], name_mode: str, found_name: str, dob: 
     return status == "Accept"
 
 
-def document_verified(page_verified: list[bool], page_numbers: list[int], total: int) -> str:
-    statuses = ["Accept" if ok else "Reject" for ok in page_verified]
-    after = apply_what_if(statuses, page_numbers, total)
-    if after and all(status == "Reject" for status in after):
-        return "Reject"
-    return "Accept"
+def classify_page(
+    ocr_text: str,
+    ner_names: list[str],
+    expected: dict[str, str],
+    name_mode: str,
+    verified: bool,
+) -> str:
+    """Verified / wrong member / not verified for one page.
+
+    A page counts as wrong member only when a patient-name context on the page
+    names someone other than the expected member. A page with nothing detected
+    is not considered.
+    """
+    wrong_member = not verified and wrong_member_on_page(
+        ocr_text,
+        expected,
+        name_mode,
+        ner_names,
+    )
+    return page_status(verified=verified, wrong_member=wrong_member)
+
+
+def document_verified(page_statuses: list[str], total: int) -> str:
+    return apply_what_if(page_statuses, total)
 
 
 def ocr_record(record_id: str) -> list[dict]:
@@ -231,25 +523,44 @@ def ocr_record(record_id: str) -> list[dict]:
     return pages
 
 
+def page_count_of(document: dict | None, pages: list[dict]) -> int:
+    if document and document.get("pageCount") is not None:
+        try:
+            return int(document["pageCount"])
+        except (TypeError, ValueError):
+            pass
+    return len(pages)
+
+
+def load_blob_document(record_id: str) -> tuple[dict | None, list[dict]]:
+    document = blob_store.load_ocr_document(record_id)
+    pages = list((document or {}).get("pages") or []) if document else []
+    pages = sorted(pages, key=lambda page: int(page.get("pageNumber") or 0))
+    return document, pages
+
+
 def verify_record(
     record_id: str,
     pages: list[dict],
     expected: dict[str, str],
     name_mode: str,
     model_id: str,
-    member_dir: Path,
-    ner_dir: Path,
-) -> pd.DataFrame:
+) -> tuple[list[dict], list[dict]]:
+    """Verify one record with one model; return (member rows, ner rows)."""
     use_model(model_id)
-    reset_ner_log()
     total = len(pages)
     rows: list[dict[str, str | int | bool]] = []
-    verified: list[bool] = []
-    page_numbers: list[int] = []
+    ner_rows: list[dict] = []
     for index, page in enumerate(pages, start=1):
         text = page_text(page)
         page_no = int(page.get("pageNumber") or index)
-        fields = extract_page_fields(text, expected, name_mode, model_id)
+        # One batch CSV holds every record, so each NER hit has to carry the
+        # record and page it was read from.
+        reset_ner_log()
+        fields, ner_names = extract_page_fields(text, expected, name_mode, model_id)
+        ner_rows.extend(
+            {"RecordId": record_id, "Page_No": page_no, **row} for row in ner_log_rows()
+        )
         page_ok = verify_page(
             expected,
             name_mode,
@@ -257,8 +568,7 @@ def verify_record(
             fields["Detected_DOB"],
             fields["Detected_MemberID"],
         )
-        verified.append(page_ok)
-        page_numbers.append(page_no)
+        status = classify_page(text, ner_names, expected, name_mode, page_ok)
         rows.append(
             {
                 "RecordId": record_id,
@@ -266,34 +576,53 @@ def verify_record(
                 "Page_No": page_no,
                 **fields,
                 "Page_Verified": page_ok,
-                "Page_Detection_Correct": "",
-                "Page_Detection_InCorrect": "",
+                "Page_Detection_Correct": status == PAGE_VERIFIED,
+                "Page_Detection_InCorrect": status == PAGE_WRONG_MEMBER,
+                "_Page_Status": status,
             }
         )
 
     rows.sort(key=lambda row: int(row.get("Page_No") or 0))
-    page_numbers = [int(row["Page_No"]) for row in rows]
-    verified = [bool(row["Page_Verified"]) for row in rows]
-    doc_status = document_verified(verified, page_numbers, total)
+    statuses = [str(row["_Page_Status"]) for row in rows]
+    doc_status = document_verified(statuses, total)
     for row in rows:
         row["Document_Verified"] = doc_status
+        row.pop("_Page_Status", None)
 
-    member_dir.mkdir(parents=True, exist_ok=True)
-    ner_dir.mkdir(parents=True, exist_ok=True)
-    frame = pd.DataFrame(rows, columns=COLUMNS)
-    csv_path = member_dir / f"{model_id}.csv"
-    frame.to_csv(csv_path, index=False)
-    logger.info("wrote %s", csv_path)
+    logger.info(
+        "record %s model %s: pages=%s verified=%s wrong_member=%s not_verified=%s "
+        "reject_at=%s document=%s",
+        record_id,
+        model_id,
+        total,
+        statuses.count(PAGE_VERIFIED),
+        count_wrong_member(statuses),
+        statuses.count(PAGE_NOT_VERIFIED),
+        reject_threshold(total),
+        doc_status,
+    )
+    return rows, ner_rows
 
-    ner_frame = pd.DataFrame(ner_log_rows(), columns=NER_COLUMNS)
-    ner_path = ner_dir / f"{model_id}.csv"
-    ner_frame.to_csv(ner_path, index=False)
-    logger.info("wrote %s", ner_path)
-    unload_ner_model()
-    return frame
+
+def _require_blob() -> tuple[str, str]:
+    try:
+        prefix = blob_store.require_write_prefix()
+    except RuntimeError as err:
+        raise SystemExit(str(err)) from err
+    if not blob_store.storage_configured():
+        raise SystemExit("Azure Blob Storage is not configured in .env")
+    return blob_store.AZURE_STORAGE_CONTAINER, prefix
 
 
-def run() -> pd.DataFrame:
+def run(mode: str = "all") -> pd.DataFrame:
+    """Work the verification queue, then write one batch of CSVs.
+
+    mode "all" verifies every queued record; mode "selected" skips OCR JSON
+    docs with more pages than MAX_PAGES.
+    """
+    if mode not in {"all", "selected"}:
+        raise ValueError(f"unknown mode {mode!r}")
+
     system_path = mv_config.System_Input_path
     if not system_path.is_file():
         raise SystemExit(f"system_input.csv not found at {system_path}")
@@ -301,52 +630,115 @@ def run() -> pd.DataFrame:
     if not system_rows:
         raise SystemExit(f"No records in {system_path}")
 
-    enabled_ids = mv_config.enabled_model_ids()
+    enabled_ids = [by_id(model_id)["id"] for model_id in mv_config.enabled_model_ids()]
     if not enabled_ids:
         raise SystemExit("No NER models enabled in config/.env")
 
-    try:
-        blob_store.require_write_prefix()
-    except RuntimeError as err:
-        raise SystemExit(str(err)) from err
-    if not blob_store.storage_configured():
-        raise SystemExit("Azure Blob Storage is not configured in .env")
+    # A model with no checkpoint on disk logs one error and then silently
+    # detects nothing, which also silently disables wrong-member detection.
+    # Fail before the queue runs instead of writing a batch of empty NER CSVs.
+    absent = missing_weights(enabled_ids)
+    if absent:
+        raise SystemExit(
+            "NER weights missing for enabled model(s): "
+            + ", ".join(absent)
+            + ". Download them with Models/model_downloader/__main__.py, or "
+            "disable them in .env (GLINER_LARGE / GLINER_MEDIUM / GLINER_LOW)."
+        )
 
-    record_ids = blob_store.list_ocr_record_ids()
-    record_source = f"{blob_store.AZURE_STORAGE_CONTAINER}/{blob_store.AZURE_OCR_STORAGE_WRITE_PREFIX}"
+    container, prefix = _require_blob()
+    max_pages = int(mv_config.MAX_PAGES)
+    record_ids = [
+        record_id
+        for record_id in blob_store.list_ocr_record_ids()
+        if record_id in system_rows
+    ]
+    record_source = f"{container}/{prefix}"
     logger.info("OCR read from blob: %s", record_source)
-    logger.info("MV CSV root: %s", mv_config.MV_Output_path)
-    logger.info("NER CSV root: %s", mv_config.NER_Output_path)
+    logger.info("output root: %s", mv_config.Output_path)
+    logger.info("mode=%s models=%s", mode, enabled_ids)
+    if mode == "selected":
+        logger.info("MAX_PAGES=%s", max_pages)
 
-    frames: list[pd.DataFrame] = []
-    for record_id in record_ids:
-        if record_id not in system_rows:
-            logger.info("skip %s (not in system_input.csv)", record_id)
-            continue
-        pages = ocr_record(record_id)
-        member_dir = mv_config.record_mv_output_dir(record_id)
-        ner_dir = mv_config.record_ner_output_dir(record_id)
-        for model_id in enabled_ids:
-            logger.info("ner model %s on %s", model_id, record_id)
-            frame = verify_record(
-                record_id,
-                pages,
-                system_rows[record_id],
-                name_mode,
-                by_id(model_id)["id"],
-                member_dir,
-                ner_dir,
-            )
-            frames.append(frame)
+    progress = load_progress(record_ids, mode, enabled_ids, container, prefix)
+    remaining = pending_records(progress)
+    logger.info(
+        "queue remaining=%s of %s records",
+        len(remaining),
+        progress.get("record_count"),
+    )
 
+    try:
+        for record_id in remaining:
+            _set_item_status(progress, record_id, "running", error=None)
+            try:
+                document, pages = load_blob_document(record_id)
+                if not pages:
+                    logger.info("skip %s (empty OCR JSON)", record_id)
+                    _set_item_status(progress, record_id, "skipped", pageCount=0)
+                    continue
+
+                count = page_count_of(document, pages)
+                if mode == "selected" and count > max_pages:
+                    logger.info("skip %s (pages=%s > MAX_PAGES=%s)", record_id, count, max_pages)
+                    _set_item_status(progress, record_id, "skipped", pageCount=count)
+                    continue
+
+                already = _models_done(progress, record_id)
+                for model_id in enabled_ids:
+                    if model_id in already:
+                        logger.info("skip %s model %s (already staged)", record_id, model_id)
+                        continue
+                    logger.info("ner model %s on %s (pages=%s)", model_id, record_id, count)
+                    member_rows, ner_rows = verify_record(
+                        record_id,
+                        pages,
+                        system_rows[record_id],
+                        name_mode,
+                        model_id,
+                    )
+                    append_rows(MEMBER_KIND, model_id, COLUMNS, member_rows)
+                    append_rows(NER_KIND, model_id, NER_COLUMNS, ner_rows)
+                    _mark_model_done(progress, record_id, model_id)
+                _set_item_status(progress, record_id, "done", pageCount=count)
+            except Exception as exc:
+                logger.exception("record %s failed: %s", record_id, exc)
+                _set_item_status(progress, record_id, "error", error=str(exc))
+                raise
+    except KeyboardInterrupt:
+        progress["status"] = "stopped"
+        for item in progress.get("queue") or []:
+            if item.get("status") == "running":
+                item["status"] = "pending"
+        save_progress(progress)
+        logger.info("stopped; queue saved for resume (staged rows kept)")
+        raise
+    except Exception:
+        progress["status"] = "error"
+        save_progress(progress)
+        raise
+
+    progress["status"] = "done"
+    save_progress(progress)
+    logger.info("queue finished: %s", queue_counts(progress))
+
+    batch_dir = finalize_batch()
+    if batch_dir is None:
+        raise SystemExit(f"No verified records under {record_source}")
+    logger.info("batch output: %s", batch_dir)
+
+    frames = [
+        pd.read_csv(path, encoding="utf-8-sig")
+        for path in sorted(batch_dir.glob(f"{mv_config.MV_CSV_PREFIX}_*.csv"))
+    ]
     if not frames:
-        raise SystemExit(f"No matching records under {record_source}")
+        raise SystemExit(f"No verified records under {record_source}")
     return pd.concat(frames, ignore_index=True)
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    frame = run()
+    frame = run("all")
     print(frame.to_string(index=False))
     return 0
 
