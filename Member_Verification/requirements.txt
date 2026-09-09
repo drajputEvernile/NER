@@ -1,4 +1,4 @@
-# Member Verification — blob OCR JSON read + rule/NER verification
+# Member_Verification — blob OCR JSON read + rule/NER verification
 pandas>=2.2.0
 gliner>=0.2.21
 sentencepiece>=0.2.0

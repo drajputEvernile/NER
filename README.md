@@ -8,110 +8,76 @@ python -m venv .venv
 copy .env.example .env
 ```
 
-Fill Azure keys in `.env` only if you use Azure OCR. Copy `Data/Raw/system_input.csv` and put page images in `Data/Raw/{RecordId}/`.
+## Layout
 
-Turn engines and NER models on or off in `.env`:
+| Folder | Role |
+|---|---|
+| `Azure_OCR/` | Azure Document Intelligence → blob OCR JSON |
+| `Docling_OCR/` | Local Docling OCR → `Data/output/...` |
+| `Member_Verification/` | Verification (reads OCR JSON from blob only) |
+| `Models/` | NER weights + `model_downloader/` |
+| `azure_blob/` | Shared blob helpers |
 
-```
-DOCLING_OCR=true
-AZURE_OCR=false
-GLINER_LARGE=true
-GLINER_MEDIUM=true
-GLINER_LOW=true
-DISTILROBERTA_BASE_NER=true
-```
-
-## Run OCR
-
-Uses Docling and/or Azure based on `.env`. Writes **one JSON per record** (not per page). Existing combined JSON is reused. Old per-page JSON files are merged into the combined file if those exist and the combined file does not.
-
-```powershell
-.\.venv\Scripts\python.exe "src\OCR\run.py"
-```
-
-Per record, for example Test1: `Data/output/Test1/Docling_OCR_Output/Test1.json`. Member verification reads `pages[].content`.
-
-## Run member verification
-
-Runs OCR (cached pages skip conversion), then verification for every enabled NER model.
-
-```powershell
-.\.venv\Scripts\python.exe "src\Member Verification\run.py"
-```
-
-Same pipeline:
-
-```powershell
-.\.venv\Scripts\python.exe src\run.py
-```
-
-Outputs per record:
-
-- `Data/output/{RecordId}/Docling_OCR_Output/{RecordId}.json`
-- `Data/output/{RecordId}/Member_Verification_Output/{model}.csv`
-- `Data/output/{RecordId}/ner_output/{model}.csv`
+Blob path prefixes live only in `.env` (`AZURE_OCR_RAW_STORAGE_PREFIX`, `AZURE_OCR_STORAGE_WRITE_PREFIX`).
 
 ## Download NER models
 
-Hugging Face is used only here. Inference stays local.
-
-All four:
-
 ```powershell
 $env:HF_HUB_DISABLE_XET='1'
-.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\__main__.py"
+.\.venv\Scripts\python.exe Models\model_downloader\__main__.py
 ```
 
-One model at a time:
+Individual models:
 
 ```powershell
-$env:HF_HUB_DISABLE_XET='1'
-.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\gliner_large_v2_1.py"
-.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\gliner_medium_v2_1.py"
-.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\gliner_low.py"
-.\.venv\Scripts\python.exe "src\Member Verification\extractors\ner_based\ner_models\model_downloader\distilroberta_base_ner.py"
+.\.venv\Scripts\python.exe Models\model_downloader\gliner_large_v2_1.py
+.\.venv\Scripts\python.exe Models\model_downloader\gliner_medium_v2_1.py
+.\.venv\Scripts\python.exe Models\model_downloader\gliner_low.py
 ```
 
-| Script | Local folder |
-|---|---|
-| `gliner_large_v2_1.py` | `src/Member Verification/extractors/ner_based/ner_models/models/gliner_large-v2.1/` |
-| `gliner_medium_v2_1.py` | `src/Member Verification/extractors/ner_based/ner_models/models/gliner_medium-v2.1/` |
-| `gliner_low.py` | `src/Member Verification/extractors/ner_based/ner_models/models/gliner_low/` |
-| `distilroberta_base_ner.py` | `src/Member Verification/extractors/ner_based/ner_models/models/distilroberta-base-ner/` |
+## Run local Docling OCR
 
-## Change paths
+```powershell
+.\.venv\Scripts\python.exe Docling_OCR\run.py
+```
 
-Paths are not in `.env`. Edit the `config.py` in the folder you are using. Values are relative to the repo root unless you pass an absolute path to `repo_path(...)`.
+Output: `Data/output/{RecordId}/Docling_OCR_Output/{RecordId}.json`
 
-**OCR** — `src/OCR/config.py` and the matching engine file:
+## Run Azure OCR (blob)
 
-| Variable | File | Default |
-|---|---|---|
-| `RAW_Read_Path` | `src/OCR/config.py`, `src/OCR/Docling OCR/config.py`, `src/OCR/Azure OCR/config.py` | `Data/Raw` |
-| `Docling_OCR_Output_path` | `src/OCR/config.py`, `src/OCR/Docling OCR/config.py` | `Data/output` |
-| `Docling_OCR_Folder` | same | `Docling_OCR_Output` |
-| `Azure_OCR_Output_path` | `src/OCR/config.py`, `src/OCR/Azure OCR/config.py` | `Data/output` |
-| `Azure_OCR_Folder` | same | `Azure_OCR_Output` |
+```powershell
+.\.venv\Scripts\python.exe Azure_OCR\run.py
+```
 
-**Member verification** — `src/Member Verification/config.py`:
+Reads images from `AZURE_OCR_RAW_STORAGE_PREFIX`, writes OCR JSON to `AZURE_OCR_STORAGE_WRITE_PREFIX`.
+On start it tallies folders/pages into `Azure_OCR/azure_ocr_progress.json` (queue + progress), then processes **one record / one page at a time** (sequential).
+Pages are saved sorted by `fileName` ascending (`pageNumber` = 1..N).
 
-| Variable | Default |
-|---|---|
-| `RAW_Read_Path` | `Data/Raw` |
-| `System_Input_path` | `Data/Raw/system_input.csv` |
-| `OCR_Read_path` | `Data/output` |
-| `OCR_Read_Folder` | `Docling_OCR_Output` |
-| `MV_Output_path` | `Data/output` |
-| `MV_Output_Folder` | `Member_Verification_Output` |
-| `NER_Output_path` | `Data/output` |
-| `NER_Output_Folder` | `ner_output` |
+## Run member verification
 
-Example: point verification at Azure OCR text by setting `OCR_Read_Folder = "Azure_OCR_Output"`.
+Reads OCR from blob (`AZURE_OCR_STORAGE_WRITE_PREFIX`).
 
-**NER weights** — `src/Member Verification/extractors/ner_based/config.py`:
+```powershell
+.\.venv\Scripts\python.exe Member_Verification\run.py
+```
 
-| Variable | Default |
-|---|---|
-| `NER_MODELS_PATH` | `src/Member Verification/extractors/ner_based/ner_models/models` |
+Selected docs only (page count ≤ `MAX_PAGES` in `.env`):
 
-Keep folder names in the Docling, Azure, and member-verification configs in sync if you change them in more than one file.
+```powershell
+.\.venv\Scripts\python.exe Member_Verification\run_selected.py
+```
+
+Outputs:
+
+- `{MV_OUTPUT_PATH}/{RecordId}/member_verification/{model}.csv`
+- `{NER_OUTPUT_PATH}/{RecordId}/ner/{model}.csv`
+
+Default roots: `E:\Projects\NER\Data\output`
+
+## NER toggles (`.env`)
+
+```
+GLINER_LARGE=true
+GLINER_MEDIUM=true
+GLINER_LOW=true
+```

@@ -4,7 +4,7 @@ OCR pages come from Azure Blob (AZURE_OCR_STORAGE_WRITE_PREFIX in .env).
 CSV outputs go under absolute MV_OUTPUT_PATH / NER_OUTPUT_PATH from config.
 
 Usage (from repo root):
-  .\\.venv\\Scripts\\python.exe "Member Verification\\run.py"
+  .\\.venv\\Scripts\\python.exe Member_Verification\\run.py
 
 Download NER models:
   .\\.venv\\Scripts\\python.exe Models\\model_downloader\\__main__.py

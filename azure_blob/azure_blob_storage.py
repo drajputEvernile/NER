@@ -1,10 +1,10 @@
 """Shared Azure Blob Storage helpers (Entra auth).
 
-Used by Azure_OCR (read raw images + write OCR JSON) and Member Verification (read OCR JSON).
+Used by Azure_OCR (read raw images + write OCR JSON) and Member_Verification (read OCR JSON).
 
 Blob path prefixes come only from the repo-root .env:
   AZURE_OCR_RAW_STORAGE_PREFIX   — raw record image folders
-  AZURE_OCR_STORAGE_WRITE_PREFIX — OCR JSON output / Member Verification OCR read
+  AZURE_OCR_STORAGE_WRITE_PREFIX — OCR JSON output / Member_Verification OCR read
 """
 
 from __future__ import annotations

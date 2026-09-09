@@ -7,7 +7,7 @@ Writes CSVs under absolute MV_OUTPUT_PATH / NER_OUTPUT_PATH:
   {root}/{RecordId}/ner/{model}.csv
 
 Usage (from repo root):
-  .\\.venv\\Scripts\\python.exe "Member Verification\\run_selected.py"
+  .\\.venv\\Scripts\\python.exe Member_Verification\\run_selected.py
 """
 
 from __future__ import annotations

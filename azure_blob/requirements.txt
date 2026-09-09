@@ -1,4 +1,4 @@
-# Shared Azure Blob helpers used by Azure_OCR and Member Verification
+# Shared Azure Blob helpers used by Azure_OCR and Member_Verification
 azure-storage-blob>=12.19.0
 azure-identity>=1.17.0
 azure-core>=1.30.0

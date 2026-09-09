@@ -4,8 +4,10 @@
 # Data
 Data/
 
-# Local NER weights
-src/Member Verification/extractors/ner_based/ner_models/models/
+# Local NER weights under Models/
+Models/gliner_large-v2.1/
+Models/gliner_medium-v2.1/
+Models/gliner_low/
 
 # Python
 __pycache__/
@@ -21,4 +23,3 @@ venv/
 
 iMGE
 rawi
-
