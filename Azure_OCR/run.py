@@ -1,8 +1,7 @@
 """OCR images from Azure Blob raw prefix; write JSON to OCR write prefix.
 
 Builds a queue in azure_ocr_progress.json (folder tally + page counts), then
-processes up to PARALLEL_RECORDS folders in parallel with at most
-MAX_AZURE_REQUESTS concurrent Azure Document Intelligence calls.
+processes one record at a time, one page at a time (no parallel workers).
 
 Prefixes come only from repo-root .env:
   AZURE_OCR_RAW_STORAGE_PREFIX
@@ -17,8 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,9 +29,6 @@ import config as azure_config
 from azure_read_ocr import AzureReadOcrExtractor
 
 logger = logging.getLogger(__name__)
-
-_PROGRESS_LOCK = threading.Lock()
-_AZURE_SLOTS: threading.Semaphore | None = None
 
 
 def utc_now() -> str:
@@ -82,7 +76,6 @@ def build_queue() -> tuple[list[dict], int, list[str]]:
                     done_names.add(name)
         is_complete = bool(raw_names) and raw_names <= done_names
         if not raw_names:
-            # Empty raw folder: nothing to OCR.
             is_complete = True
         status = "done" if is_complete else "pending"
         if is_complete:
@@ -116,8 +109,6 @@ def new_progress(queue: list[dict], total_pages: int, completed: list[str] | Non
         "ocr_blob_prefix": blob_store.require_write_prefix(),
         "folder_count": len(queue),
         "page_count_total": total_pages,
-        "parallel_records": azure_config.PARALLEL_RECORDS,
-        "max_azure_requests": azure_config.MAX_AZURE_REQUESTS,
         "queue": queue,
         "completed": list(completed or []),
         "started_at": utc_now(),
@@ -163,7 +154,6 @@ def load_progress() -> dict:
         )
         return progress
 
-    # Interrupted "running" items go back to pending so they can resume.
     for item in progress["queue"]:
         if str(item.get("status") or "") == "running":
             item["status"] = "pending"
@@ -193,31 +183,29 @@ def _queue_item(progress: dict, record_id: str) -> dict | None:
 
 
 def _set_item_status(progress: dict, record_id: str, status: str, **extra) -> None:
-    with _PROGRESS_LOCK:
-        item = _queue_item(progress, record_id)
-        if item is None:
-            return
-        item["status"] = status
-        for key, value in extra.items():
-            item[key] = value
-        if status == "done":
-            completed = list(progress.get("completed") or [])
-            if record_id not in completed:
-                completed.append(record_id)
-            progress["completed"] = completed
-        save_progress(progress)
+    item = _queue_item(progress, record_id)
+    if item is None:
+        return
+    item["status"] = status
+    for key, value in extra.items():
+        item[key] = value
+    if status == "done":
+        completed = list(progress.get("completed") or [])
+        if record_id not in completed:
+            completed.append(record_id)
+        progress["completed"] = completed
+    save_progress(progress)
 
 
 def _mark_page_done(progress: dict, record_id: str, file_name: str) -> None:
-    with _PROGRESS_LOCK:
-        item = _queue_item(progress, record_id)
-        if item is None:
-            return
-        done = list(item.get("pages_done") or [])
-        if file_name not in done:
-            done.append(file_name)
-        item["pages_done"] = sorted(done)
-        save_progress(progress)
+    item = _queue_item(progress, record_id)
+    if item is None:
+        return
+    done = list(item.get("pages_done") or [])
+    if file_name not in done:
+        done.append(file_name)
+    item["pages_done"] = sorted(done)
+    save_progress(progress)
 
 
 def pending_records(progress: dict) -> list[str]:
@@ -254,17 +242,6 @@ def done_file_names(document: dict) -> set[str]:
     return names
 
 
-def _extract_page(
-    extractor: AzureReadOcrExtractor,
-    image_bytes: bytes,
-    file_name: str,
-    page_number: int,
-) -> dict:
-    assert _AZURE_SLOTS is not None
-    with _AZURE_SLOTS:
-        return extractor.extract_page_bytes(image_bytes, file_name, page_number)
-
-
 def ocr_record(
     record_id: str,
     folder_no: int,
@@ -284,12 +261,11 @@ def ocr_record(
 
         document = load_document(record_id)
         already = done_file_names(document)
-        with _PROGRESS_LOCK:
-            item = _queue_item(progress, record_id)
-            if item is not None:
-                item["pages_done"] = sorted(already)
-                item["pageCount"] = len(pages)
-                save_progress(progress)
+        item = _queue_item(progress, record_id)
+        if item is not None:
+            item["pages_done"] = sorted(already)
+            item["pageCount"] = len(pages)
+            save_progress(progress)
 
         pending = [
             (page_number, file_name, blob_name)
@@ -301,9 +277,7 @@ def ocr_record(
             logger.info("finished record %s (already complete)", record_id)
             return
 
-        doc_lock = threading.Lock()
-
-        def work(page_number: int, file_name: str, blob_name: str) -> None:
+        for page_number, file_name, blob_name in pending:
             logger.info(
                 "ocr page %s/%s folder %s/%s record=%s file=%s",
                 page_number,
@@ -314,23 +288,12 @@ def ocr_record(
                 file_name,
             )
             image_bytes = blob_store.download_bytes(blob_name)
-            page = _extract_page(extractor, image_bytes, file_name, page_number)
-            with doc_lock:
-                document["pages"] = [item for item in document["pages"] if item.get("fileName") != file_name]
-                document["pages"].append(page)
-                # save_ocr_document sorts by fileName ascending and renumbers pageNumber
-                save_document(record_id, document)
+            page = extractor.extract_page_bytes(image_bytes, file_name, page_number)
+            document["pages"] = [item for item in document["pages"] if item.get("fileName") != file_name]
+            document["pages"].append(page)
+            # save_ocr_document sorts by fileName ascending and renumbers pageNumber
+            save_document(record_id, document)
             _mark_page_done(progress, record_id, file_name)
-
-        # Cap in-record workers by the global Azure request limit.
-        workers = max(1, min(len(pending), azure_config.MAX_AZURE_REQUESTS))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(work, page_number, file_name, blob_name)
-                for page_number, file_name, blob_name in pending
-            ]
-            for future in as_completed(futures):
-                future.result()
 
         _set_item_status(progress, record_id, "done")
         logger.info("finished record %s (%s/%s)", record_id, folder_no, folder_count)
@@ -341,8 +304,6 @@ def ocr_record(
 
 
 def main() -> int:
-    global _AZURE_SLOTS
-
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("azure").setLevel(logging.WARNING)
     logging.getLogger("azure.identity").setLevel(logging.WARNING)
@@ -358,15 +319,10 @@ def main() -> int:
     except RuntimeError as err:
         raise SystemExit(str(err)) from err
 
-    # One login / one blob client before any parallel workers start.
     try:
         blob_store.ensure_blob_ready()
     except Exception as err:
         raise SystemExit(f"Azure Blob auth failed: {err}") from err
-
-    parallel_records = max(1, int(azure_config.PARALLEL_RECORDS))
-    max_azure = max(1, int(azure_config.MAX_AZURE_REQUESTS))
-    _AZURE_SLOTS = threading.Semaphore(max_azure)
 
     logger.info(
         "raw images <- %s/%s/{record}/...",
@@ -378,7 +334,7 @@ def main() -> int:
         blob_store.AZURE_STORAGE_CONTAINER,
         write_prefix,
     )
-    logger.info("parallel_records=%s max_azure_requests=%s", parallel_records, max_azure)
+    logger.info("mode=sequential (one record, one page at a time)")
 
     progress = load_progress()
     queue = list(progress.get("queue") or [])
@@ -401,48 +357,30 @@ def main() -> int:
         progress.get("page_count_total"),
     )
 
-    errors: list[str] = []
     try:
-        with ThreadPoolExecutor(max_workers=parallel_records) as pool:
-            futures = {
-                pool.submit(
-                    ocr_record,
-                    record_id,
-                    index_by_id.get(record_id, 0),
-                    folder_count,
-                    progress,
-                    extractor,
-                ): record_id
-                for record_id in remaining
-            }
-            for future in as_completed(futures):
-                record_id = futures[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    errors.append(f"{record_id}: {exc}")
+        for record_id in remaining:
+            ocr_record(
+                record_id,
+                index_by_id.get(record_id, 0),
+                folder_count,
+                progress,
+                extractor,
+            )
     except KeyboardInterrupt:
-        with _PROGRESS_LOCK:
-            progress["status"] = "stopped"
-            for item in progress.get("queue") or []:
-                if item.get("status") == "running":
-                    item["status"] = "pending"
-            save_progress(progress)
+        progress["status"] = "stopped"
+        for item in progress.get("queue") or []:
+            if item.get("status") == "running":
+                item["status"] = "pending"
+        save_progress(progress)
         logger.info("stopped; queue saved for resume")
         return 130
-
-    if errors:
-        with _PROGRESS_LOCK:
-            progress["status"] = "error"
-            save_progress(progress)
-        logger.error("finished with %s record errors", len(errors))
-        for err in errors[:20]:
-            logger.error("  %s", err)
-        return 1
-
-    with _PROGRESS_LOCK:
-        progress["status"] = "done"
+    except Exception:
+        progress["status"] = "error"
         save_progress(progress)
+        raise
+
+    progress["status"] = "done"
+    save_progress(progress)
     logger.info("done: %s/%s folders", folder_count, folder_count)
     return 0
 

@@ -22,11 +22,6 @@ PROGRESS_FILE = HERE / "azure_ocr_progress.json"
 OCR_JSON_SUFFIX = "_final2.json"
 
 AZURE_POLL_TIMEOUT_SECONDS = 180
-# Up to this many record folders processed at once.
-# Keep low to avoid Azure Blob connection-pool exhaustion (max=10).
-PARALLEL_RECORDS = 4
-# Hard cap on concurrent Azure Document Intelligence requests.
-MAX_AZURE_REQUESTS = 14
 
 
 def _load_repo_env() -> None:
@@ -47,5 +42,3 @@ AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT = (os.environ.get("AZURE_DOCUMENT_INTELLIGE
 AZURE_DOCUMENT_INTELLIGENCE_KEY = (os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY") or "").strip()
 AZURE_POLL_TIMEOUT_SECONDS = int((os.environ.get("AZURE_POLL_TIMEOUT_SECONDS") or str(AZURE_POLL_TIMEOUT_SECONDS)).strip() or 180)
 AZURE_STORAGE_CONTAINER = (os.environ.get("AZURE_STORAGE_CONTAINER") or "").strip()
-PARALLEL_RECORDS = int((os.environ.get("AZURE_OCR_PARALLEL_RECORDS") or str(PARALLEL_RECORDS)).strip() or 10)
-MAX_AZURE_REQUESTS = int((os.environ.get("AZURE_OCR_MAX_REQUESTS") or str(MAX_AZURE_REQUESTS)).strip() or 14)
