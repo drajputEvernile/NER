@@ -201,7 +201,7 @@ def ocr_record(record_id: str, folder_no: int, folder_count: int, progress: dict
         page = extractor.extract_page_bytes(image_bytes, file_name, page_number)
         document["pages"] = [item for item in document["pages"] if item.get("fileName") != file_name]
         document["pages"].append(page)
-        document["pages"].sort(key=lambda item: int(item.get("pageNumber") or 0))
+        # save_ocr_document sorts by fileName ascending and renumbers pageNumber
         save_document(record_id, document)
         already.add(file_name)
         progress["current_pages_done"] = sorted(already)

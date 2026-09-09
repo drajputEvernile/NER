@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ REPO_ROOT = HERE.parent
 _CLIENT = None
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+_FILENAME_PARTS = re.compile(r"(\d+)")
 
 
 def _load_repo_env() -> None:
@@ -46,6 +48,31 @@ AZURE_STORAGE_PREFIX = (os.environ.get("AZURE_STORAGE_PREFIX") or "").strip().st
 AZURE_STORAGE_WRITE_PREFIX = (os.environ.get("AZURE_STORAGE_WRITE_PREFIX") or "").strip().strip("/")
 
 OCR_JSON_SUFFIX = "_final2.json"
+
+
+def filename_sort_key(name: str) -> tuple:
+    """Natural ascending sort for file names (so 2.png comes before 10.png)."""
+    text = str(name or "").casefold()
+    parts: list = []
+    for part in _FILENAME_PARTS.split(text):
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part))
+    return tuple(parts)
+
+
+def sort_ocr_pages_by_filename(document: dict) -> dict:
+    """Sort pages by fileName ascending and renumber pageNumber 1..N."""
+    pages = list(document.get("pages") or [])
+    pages.sort(key=lambda page: filename_sort_key(str(page.get("fileName") or "")))
+    for index, page in enumerate(pages, start=1):
+        page["pageNumber"] = index
+    document["pages"] = pages
+    document["pageCount"] = len(pages)
+    return document
 
 
 def use_entra() -> bool:
@@ -198,7 +225,7 @@ def list_raw_page_blobs(record_id: str) -> list[tuple[str, str]]:
         if suffix not in IMAGE_EXTENSIONS:
             continue
         pages.append((relative, name))
-    pages.sort(key=lambda item: item[0].casefold())
+    pages.sort(key=lambda item: filename_sort_key(item[0]))
     return pages
 
 
@@ -228,7 +255,7 @@ def download_json(blob_name: str) -> dict | None:
 
 
 def save_ocr_document(record_id: str, document: dict) -> str:
-    document["pageCount"] = len(document.get("pages") or [])
+    sort_ocr_pages_by_filename(document)
     blob_name = record_ocr_blob_name(record_id)
     upload_json(blob_name, document)
     return blob_name
