@@ -75,7 +75,57 @@ def _encoder_ready(encoder: Path) -> bool:
     return config.is_file() and tokenizer_config.is_file() and spm.is_file()
 
 
-def download_gliner(spec: dict, *, force: bool = False) -> Path:
+def _weights_file(dest: Path) -> Path | None:
+    for name in ("model.safetensors", "pytorch_model.bin"):
+        candidate = dest / name
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+    return None
+
+
+def verify_complete(spec: dict, dest: Path) -> None:
+    """Fail unless every file the model needs is present and non-empty."""
+    missing: list[str] = []
+    weights = _weights_file(dest)
+    if weights is None:
+        missing.append("model.safetensors or pytorch_model.bin")
+    if not (dest / "gliner_config.json").is_file():
+        missing.append("gliner_config.json")
+    if spec.get("encoder_repo") and not _encoder_ready(dest / "encoder"):
+        missing.append("encoder/ (config.json + tokenizer_config.json + spm.model)")
+    if missing:
+        raise RuntimeError(
+            f"{spec['id']} is incomplete at {dest}; missing: {', '.join(missing)}"
+        )
+    size_mb = weights.stat().st_size / (1024 * 1024)
+    print(f"  files complete ({weights.name}, {size_mb:.0f} MB)")
+
+
+def verify_loads(spec: dict, dest: Path) -> None:
+    """Load the model and run one prediction, so a download is proven usable.
+
+    A snapshot can finish with every file in place and still not load, which
+    otherwise only shows up later as a run that detects nothing.
+    """
+    import os
+
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    from gliner import GLiNER
+
+    print("  loading it to check it works ...")
+    model = GLiNER.from_pretrained(str(dest), local_files_only=True)
+    hits = model.predict_entities("Patient Name: Robert Smith", ["person"], threshold=0.3)
+    names = [str(hit.get("text") or "") for hit in hits or []]
+    if not names:
+        raise RuntimeError(
+            f"{spec['id']} loaded from {dest} but recognised nobody in a test "
+            "sentence, so the checkpoint is not usable"
+        )
+    print(f"  works: read {names} out of 'Patient Name: Robert Smith'")
+
+
+def download_gliner(spec: dict, *, force: bool = False, verify: bool = True) -> Path:
     from catalog import model_dir, relink_local_paths
 
     dest = model_dir(spec)
@@ -94,5 +144,8 @@ def download_gliner(spec: dict, *, force: bool = False) -> Path:
         if not _encoder_ready(encoder):
             raise RuntimeError(f"encoder tokenizer incomplete at {encoder}")
     relink_local_paths(dest)
+    if verify:
+        verify_complete(spec, dest)
+        verify_loads(spec, dest)
     print(f"downloaded {spec['repo']} -> {dest}")
     return dest

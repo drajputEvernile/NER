@@ -41,7 +41,7 @@ def run_selected() -> pd.DataFrame:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    mv_run.setup_logging()
     frame = run_selected()
     print(frame.to_string(index=False))
     return 0

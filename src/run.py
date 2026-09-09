@@ -21,7 +21,6 @@ _spec.loader.exec_module(_mod)
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     return int(_mod.main())
 
 

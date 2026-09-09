@@ -4,10 +4,10 @@
 # Data
 Data/
 
-# Local NER weights under Models/
-Models/gliner_large-v2.1/
-Models/gliner_medium-v2.1/
-Models/gliner_low/
+# Local NER weights (Member_Verification/Models/), plus the HF cache dirs
+Member_Verification/Models/gliner_large-v2.1/
+Member_Verification/Models/gliner_medium-v2.1/
+Member_Verification/Models/gliner_low/
 
 # Local queue / progress + batch staging
 Azure_OCR/azure_ocr_progress.json

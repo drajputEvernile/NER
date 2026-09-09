@@ -5,10 +5,18 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import sys
+import time
 from pathlib import Path
 
-from .ner_models.catalog import MODELS, by_id, model_dir, relink_local_paths
-from .config import enabled_model_ids
+from .config import MV_ROOT, NER_MODELS_PATH, enabled_model_ids
+
+# The catalog lives beside the weights in Member_Verification/Models, so it is
+# imported from there rather than through a re-export package.
+if str(NER_MODELS_PATH) not in sys.path:
+    sys.path.insert(0, str(NER_MODELS_PATH))
+
+from catalog import MODELS, by_id, model_dir, relink_local_paths  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +26,16 @@ _ENABLED_IDS = enabled_model_ids()
 _ACTIVE_ID = _ENABLED_IDS[0] if _ENABLED_IDS else MODELS[0]["id"]
 _LOADED: dict[str, object] = {}
 _LOAD_FAILED: set[str] = set()
+_LOAD_ERRORS: dict[str, str] = {}
 _OFFLINE = False
+
+# Retries for a load that fails for a reason that may clear on its own.
+_LOAD_ATTEMPTS = 3
+_LOAD_RETRY_SECONDS = 2
+
+
+class ModelLoadError(RuntimeError):
+    """An enabled NER model could not be loaded."""
 
 
 def _force_offline() -> None:
@@ -59,13 +76,19 @@ def missing_weights(model_ids: list[str]) -> list[str]:
 
 
 def use_model(model_id: str) -> None:
+    """Make this the model predictions use.
+
+    Loaded checkpoints are kept, so switching between the enabled models costs
+    nothing after the first load of each. The run walks records in the outer
+    loop and models in the inner one, so unloading here meant reloading every
+    checkpoint from disk for every record. Call unload() to release them.
+    """
     global _ACTIVE_ID
-    if model_id != _ACTIVE_ID:
-        unload()
     _ACTIVE_ID = by_id(model_id)["id"]
 
 
 def unload() -> None:
+    """Release every loaded checkpoint."""
     _LOADED.clear()
     gc.collect()
     try:
@@ -73,8 +96,8 @@ def unload() -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    except Exception:
-        pass
+    except Exception:  # releasing cache is best effort, never fatal
+        logger.debug("could not empty the CUDA cache", exc_info=True)
 
 
 def _load_gliner(path: Path):
@@ -104,36 +127,82 @@ def _load_hf_token(path: Path, spec: dict):
 
 
 def get_backend(model_id: str | None = None):
+    """Return (spec, backend), loading the checkpoint on first use.
+
+    A model that will not load raises. Returning None instead meant the run
+    carried on detecting nothing and still wrote a full set of CSVs, so a
+    dead model looked exactly like a chart with no member details on it.
+    """
     spec = by_id(model_id or _ACTIVE_ID)
     model_id = spec["id"]
     if model_id in _LOADED:
         return spec, _LOADED[model_id]
     if model_id in _LOAD_FAILED:
-        return spec, None
+        raise ModelLoadError(f"{model_id} failed to load earlier: {_LOAD_ERRORS.get(model_id, 'unknown error')}")
     _force_offline()
     path = model_dir(spec)
     if not _looks_like_model(path, spec["kind"]):
-        logger.error(
-            "%s is not in %s. Run: python Models/model_downloader/__main__.py",
-            model_id,
-            path,
+        message = (
+            f"{model_id} is not in {path}. Run: python "
+            f"Member_Verification/Models/model_downloader/__main__.py"
         )
         _LOAD_FAILED.add(model_id)
-        return spec, None
+        _LOAD_ERRORS[model_id] = message
+        raise ModelLoadError(message)
     logger.info("loading %s from %s", model_id, path)
-    try:
-        if spec["kind"] == "gliner":
-            backend = _load_gliner(path)
-        elif spec["kind"] == "hf_token":
-            backend = _load_hf_token(path, spec)
-        else:
-            raise ValueError(spec["kind"])
-    except Exception:
+    backend = None
+    last_error: Exception | None = None
+    # A load can fail for a reason that clears on its own -- a file lock, an
+    # antivirus or Application Control scan of a freshly written DLL -- so a
+    # single failure is retried before the model is given up on.
+    for attempt in range(1, _LOAD_ATTEMPTS + 1):
+        try:
+            if spec["kind"] == "gliner":
+                backend = _load_gliner(path)
+            elif spec["kind"] == "hf_token":
+                backend = _load_hf_token(path, spec)
+            else:
+                raise ValueError(spec["kind"])
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt < _LOAD_ATTEMPTS:
+                logger.warning(
+                    "%s load attempt %s/%s failed (%s); retrying in %ss",
+                    model_id,
+                    attempt,
+                    _LOAD_ATTEMPTS,
+                    exc,
+                    _LOAD_RETRY_SECONDS,
+                )
+                time.sleep(_LOAD_RETRY_SECONDS)
+    if backend is None:
         logger.exception("%s could not be loaded from %s", model_id, path)
         _LOAD_FAILED.add(model_id)
-        return spec, None
+        _LOAD_ERRORS[model_id] = f"{type(last_error).__name__}: {last_error}"
+        raise ModelLoadError(
+            f"{model_id} could not be loaded from {path}: {last_error}"
+        ) from last_error
     _LOADED[model_id] = backend
     return spec, backend
+
+
+def ensure_loadable(model_ids: list[str]) -> None:
+    """Load every enabled model once, up front.
+
+    Checking that the weight files exist is not enough: a checkpoint can be
+    present and still fail to load. Doing it before the queue starts turns
+    that into one clear error instead of a whole batch of CSVs with nothing
+    detected in them.
+    """
+    failures: list[str] = []
+    for model_id in model_ids:
+        try:
+            get_backend(model_id)
+        except Exception as exc:
+            failures.append(f"{model_id}: {exc}")
+    if failures:
+        raise ModelLoadError("; ".join(failures))
 
 
 def _hit(text: str, label: str, score: float, start: int | None, end: int | None) -> dict:
@@ -205,9 +274,9 @@ def predict_entities(
     snippet = (text or "").strip()
     if not snippet:
         return []
+    # get_backend raises if the model will not load, so there is no quiet
+    # "no backend, no hits" path here any more.
     spec, backend = get_backend(model_id)
-    if backend is None:
-        return []
     if spec["kind"] == "gliner":
         hits = _predict_gliner(backend, snippet, labels, threshold)
     else:

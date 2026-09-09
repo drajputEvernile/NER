@@ -1,4 +1,4 @@
-"""NER model toggles. Weights path is Models/ at the repo root."""
+"""NER model toggles. Weights live in Member_Verification/Models."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO_ROOT = HERE.parents[3]
+# .../Member_Verification/extractors/ner_based -> Member_Verification
+MV_ROOT = HERE.parents[1]
+REPO_ROOT = HERE.parents[2]
 
 
 def _load_repo_env() -> None:
@@ -40,7 +42,7 @@ gliner_large = _env_bool("GLINER_LARGE", True)
 gliner_medium = _env_bool("GLINER_MEDIUM", True)
 gliner_low = _env_bool("GLINER_LOW", True)
 
-NER_MODELS_PATH = REPO_ROOT / "Models"
+NER_MODELS_PATH = MV_ROOT / "Models"
 
 _MODEL_FLAGS = (
     ("gliner_large", gliner_large),

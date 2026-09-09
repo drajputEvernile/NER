@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(__file__).resolve().parent
 
@@ -51,10 +54,10 @@ def _set_name_or_path(path: Path, local: Path) -> None:
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
-        return
+        raise ValueError(f"{path} does not hold a JSON object")
     resolved = str(local.resolve())
     changed = False
     for key in ("_name_or_path", "name_or_path"):
@@ -76,10 +79,10 @@ def _ensure_deberta_tokenizer(path: Path) -> None:
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
-        return
+        raise ValueError(f"{path} does not hold a JSON object")
     if data.get("vocab_type") != "spm":
         return
     changed = False

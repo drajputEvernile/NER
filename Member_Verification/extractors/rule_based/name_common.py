@@ -82,6 +82,36 @@ LABELS = frozenset(
     }
 )
 
+# Words a member's name never contains: articles, pronouns, connectors, roles,
+# relationships and chart furniture. Used to throw out an NER hit like "my
+# medical assistant" and to stop the key-value reader taking prose after a
+# bare "Patient:" key as a name.
+NON_NAME = frozenset(
+    {
+        "a", "an", "and", "or", "of", "no", "not", "the", "tha", "tne", "thc",
+        "this", "that", "these", "those", "my", "our", "your", "his", "her",
+        "their", "its", "is", "was", "with", "for", "who", "whom", "by", "to",
+        "in", "on", "at", "from", "during", "per", "via",
+        "patient", "patients", "caretaker", "caregiver", "assistant", "aide",
+        "physician", "doctor", "provider", "nurse", "practitioner", "clinician",
+        "member", "subscriber", "caller", "guardian", "spouse", "family",
+        "mother", "father", "parent", "son", "daughter", "wife", "husband",
+        "sibling", "brother", "sister", "staff", "technician", "tech",
+        "interpreter", "translator", "resident", "intern", "attending",
+        "examiner", "witness", "surgeon", "therapist", "counselor", "office",
+        "female", "male", "adult", "minor", "child", "infant", "diabetic",
+        "non", "other", "unknown", "none", "complex", "worker", "employee",
+        "name", "dob", "mrn", "fin", "ssn", "chart", "page", "bp", "pt",
+        "source", "reported", "present", "position", "location", "cognitive",
+        "impairment", "examination", "visit", "note", "history",
+    }
+)
+
+
+def is_non_name(token: str) -> bool:
+    return token.casefold() in NON_NAME
+
+
 BOTH_FULL = "both_full"
 INITIAL = "initial"
 MISMATCH = "mismatch"

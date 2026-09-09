@@ -14,26 +14,50 @@ copy .env.example .env
 |---|---|
 | `Azure_OCR/` | Azure Document Intelligence → blob OCR JSON |
 | `Docling_OCR/` | Local Docling OCR → `Data/output/...` |
-| `Member_Verification/` | Verification (reads OCR JSON from blob only) |
-| `Models/` | NER weights + `model_downloader/` |
+| `Member_Verification/` | Verification (reads OCR JSON from blob, or locally) |
+| `Member_Verification/Models/` | NER weights, `catalog.py` + `model_downloader/` |
 | `azure_blob/` | Shared blob helpers |
 
 Blob path prefixes live only in `.env` (`AZURE_OCR_RAW_STORAGE_PREFIX`, `AZURE_OCR_STORAGE_WRITE_PREFIX`).
 
 ## Download NER models
 
+Weights live next to the catalog in `Member_Verification/Models/`, and that is
+the only place the runtime looks for them.
+
 ```powershell
 $env:HF_HUB_DISABLE_XET='1'
-.\.venv\Scripts\python.exe Models\model_downloader\__main__.py
+.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\__main__.py
 ```
 
 Individual models:
 
 ```powershell
-.\.venv\Scripts\python.exe Models\model_downloader\gliner_large_v2_1.py
-.\.venv\Scripts\python.exe Models\model_downloader\gliner_medium_v2_1.py
-.\.venv\Scripts\python.exe Models\model_downloader\gliner_low.py
+.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\gliner_large_v2_1.py
+.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\gliner_medium_v2_1.py
+.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\gliner_low.py
 ```
+
+Each model is downloaded, checked for completeness, then **loaded and asked to
+read a test sentence** -- a snapshot can finish with every file present and
+still not load. Anything that fails prints its full traceback and the command
+exits non-zero.
+
+Verify what is already on disk without re-downloading:
+
+```powershell
+.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\__main__.py --check
+```
+
+A verification run also loads every enabled model before it touches the queue,
+so a bad checkpoint stops the run instead of quietly detecting nothing.
+
+## Python version
+
+Any Python from **3.12** upward works; `scipy` and `numpy` set the floor. The
+pipeline is exercised on 3.14, and 3.13 is the better-supported target of the
+two (`torch.jit.script` warns on 3.14+). Nothing here needs a specific minor
+version.
 
 ## Run local Docling OCR
 
@@ -67,6 +91,18 @@ Selected docs only (page count ≤ `MAX_PAGES` in `.env`):
 .\.venv\Scripts\python.exe Member_Verification\run_selected.py
 ```
 
+Against OCR JSON on disk instead of blob (same pipeline, no storage account
+needed — this is how to exercise the app locally):
+
+```powershell
+.\.venv\Scripts\python.exe Member_Verification\run_local.py
+.\.venv\Scripts\python.exe Member_Verification\run_local.py --records Test1,Test2
+.\.venv\Scripts\python.exe Member_Verification\run_local.py --root Data\output --mode selected
+```
+
+It reads `{root}/{RecordId}/Azure_OCR_Output/{RecordId}.json`, falling back to
+`Docling_OCR_Output/` and then `{root}/{RecordId}.json`.
+
 Like Azure OCR, the run first tallies the records into a queue
 (`Member_Verification/mv_progress.json`) and then works through it **one record
 at a time**. Rows are staged in `Member_Verification/mv_staging/` as records
@@ -80,6 +116,15 @@ one CSV per model covering every record in the batch.
 - `{MV_OUTPUT_PATH}/{YYYYMMDD_HHMMSS}/ner_{model}.csv`
 
 Default root: `E:\Projects\NER\Data\output`
+
+The batch folder is written **when the queue finishes**. Stop a run part-way
+and there is no folder yet -- the rows for the records that did finish sit in
+`Member_Verification/mv_staging/`, and the log says so on exit. Rerun to carry
+on and the batch is written then.
+
+Any failure stops the run and logs the full traceback: a model that will not
+load, a blob read that keeps failing, a bad record. Nothing is swallowed and
+turned into "detected nothing".
 
 There are **no per-record folders**: each CSV holds every record in the batch,
 one row per page. Both files lead with `RecordId` (the NER CSV also carries
@@ -111,13 +156,37 @@ The whole document is rejected once the wrong-member pages reach **5 pages or
 because nothing was detected is not considered. Delete / move / split handling
 is not implemented.
 
-Because a wrong-member page can reject a whole chart, that signal is only taken
-from a patient-name context (`Rules/wrong_member_rules.py`): the people NER
-recognised in the sentence around a patient-name key. If none of them verifies
-as the expected member, the page carries a wrong member. An attending
-physician or signer who shares the member's surname is never counted, because
-they sit outside the name sentence. Only when NER recognises nobody does a
-key-anchored token read stand in, so the rules still work with no model loaded.
+Because a wrong-member page rejects a whole chart, that signal comes from one
+place only (`Rules/wrong_member_rules.py`): the people the NER model recognised
+in the sentence around a patient-name key. If none of them verifies as the
+expected member, the page carries a wrong member; if the model recognises
+nobody, the page is not considered. Nothing reads names by token scanning --
+that cannot tell a person from prose, and it read `Patient Health
+Questionnaire` as a member. An attending physician or signer who shares the
+member's surname is never counted either, because they sit outside the name
+sentence.
+
+Hits the model labels "person" are still filtered before they count as a
+member: non-name words are trimmed off the ends (`FIN: Benjamin Benjamin` ->
+`Benjamin Benjamin`) and a hit is dropped when one survives inside it, so
+`the patient`, `my medical assistant` and `patient or family` never reach the
+decision.
+
+## Two layers per page
+
+Every page goes through the rules first and only escalates when they come up
+empty:
+
+1. **Rules, over the whole page** — name, DOB and member ID are searched for
+   across the full page text. A page whose details the rules match costs no
+   model time at all.
+2. **NER, over a key sentence** — only for a field the rules missed. The
+   sentence around that field's key is cut out of the page and the model reads
+   it. A page that failed verification also escalates here, to find out whether
+   another member is named on it.
+
+`Detection_Source_Name` / `_DOB` / `_MemberID` record which layer produced each
+value, and `ner_key_source_*` records the key the sentence was built from.
 
 ## Key sentences
 

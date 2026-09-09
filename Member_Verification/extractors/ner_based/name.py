@@ -6,7 +6,7 @@ import re
 
 from .keys import key_sentences
 from .model import predict_entities
-from ..rule_based.name_common import is_ignore, name_matches, tokenize
+from ..rule_based.name_common import is_ignore, is_non_name, name_matches, tokenize
 
 PERSON_LABELS = ["person"]
 _CLEAN = re.compile(r"\s+")
@@ -42,8 +42,33 @@ def _clean(text: str) -> str:
     return _CLEAN.sub(" ", text).strip(" #.,;:|")
 
 
+def _trim_to_name(name: str) -> str:
+    """Strip non-name words from the ends; drop the hit if one is left inside.
+
+    Whatever survives here is treated as a member name and can mark the page as
+    carrying a wrong member, which rejects the whole document, so the model
+    saying "person" is not enough on its own.
+
+    GLiNER labels plenty of things "person" that are not a member: "the
+    patient", "my medical assistant", "patient or family". Trimming rescues a
+    real name behind a label prefix without letting a stock phrase through.
+    """
+    tokens = tokenize(name)
+    while tokens and is_non_name(tokens[0]):
+        tokens.pop(0)
+    while tokens and is_non_name(tokens[-1]):
+        tokens.pop()
+    if not tokens or any(is_non_name(token) for token in tokens):
+        return ""
+    return " ".join(tokens)
+
+
 def _name_token_count(name: str) -> int:
-    return sum(1 for token in tokenize(name) if token.isalpha() and not is_ignore(token))
+    return sum(
+        1
+        for token in tokenize(name)
+        if token.isalpha() and not is_ignore(token) and not is_non_name(token)
+    )
 
 
 def _is_full_name(name: str) -> bool:
@@ -88,7 +113,12 @@ def _merge_person_hits(sentence: str, hits: list[dict]) -> list[tuple[float, str
             merged[-1] = (prev_start, stop, max(prev_score, score), joined)
         else:
             merged.append((start, end, score, name))
-    return [(score, name) for _start, _end, score, name in merged if _is_full_name(name)]
+    out: list[tuple[float, str]] = []
+    for _start, _end, score, name in merged:
+        trimmed = _trim_to_name(name)
+        if trimmed and _is_full_name(trimmed):
+            out.append((score, trimmed))
+    return out
 
 
 def name_candidates(ocr_text: str, model_id: str | None = None) -> list[tuple[float, str, str]]:

@@ -16,8 +16,8 @@ from _common import download_gliner
 SPEC = by_id("gliner_low")
 
 
-def download(*, force: bool = False) -> Path:
-    return download_gliner(SPEC, force=force)
+def download(*, force: bool = False, verify: bool = True) -> Path:
+    return download_gliner(SPEC, force=force, verify=verify)
 
 
 def main() -> int:

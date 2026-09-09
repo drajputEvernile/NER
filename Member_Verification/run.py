@@ -24,6 +24,7 @@ import json
 import logging
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,9 +47,14 @@ from extractors.ner_based.log import COLUMNS as _NER_LOG_COLUMNS
 from extractors.ner_based.log import reset as reset_ner_log
 from extractors.ner_based.log import rows as ner_log_rows
 from extractors.ner_based.member_id import extract_member_id_ner
-from extractors.ner_based.model import missing_weights, use_model
+from extractors.ner_based.model import (
+    ModelLoadError,
+    by_id,
+    ensure_loadable,
+    missing_weights,
+    use_model,
+)
 from extractors.ner_based.name import name_candidates, pick_name
-from extractors.ner_based.ner_models.catalog import by_id
 from extractors.rule_based.dob import extract_dob
 from extractors.rule_based.member_id import extract_member_id
 from extractors.rule_based.name_2_words import extract_name_2_words
@@ -93,6 +99,21 @@ NER_COLUMNS = ["RecordId", "Page_No", *_NER_LOG_COLUMNS]
 
 MEMBER_KIND = "member"
 NER_KIND = "ner"
+
+# Retries for a blob read whose connection was closed while idle.
+BLOB_READ_ATTEMPTS = 3
+BLOB_READ_RETRY_SECONDS = 3
+
+
+def setup_logging() -> None:
+    """INFO for our own logs, quiet for the SDKs.
+
+    Without this the Azure SDK logs every HTTP request and response header at
+    INFO, which buries the run and makes a slow blob read look like a hang.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    for name in ("azure", "azure.identity", "azure.core.pipeline.policies.http_logging_policy", "msal", "urllib3"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def utc_now() -> str:
@@ -389,20 +410,23 @@ def extract_page_fields(
     expected: dict[str, str],
     name_mode: str,
     model_id: str,
-) -> tuple[dict[str, str], list[str]]:
-    """Return (page fields, people NER read from the patient-name sentences).
+) -> tuple[dict[str, str], list[tuple[float, str, str]] | None]:
+    """Return (page fields, NER name candidates or None if NER never ran).
 
-    NER runs once per page over the sentence around each patient-name key. Its
-    people are used for the name when the rule-based pass found nothing, and
-    always for deciding whether the page carries a wrong member.
+    Every field is looked for with the rules over the whole page first. Only
+    where the rules find nothing does the page go to the NER layer, which
+    builds a sentence around the matching key and reads that. So a page whose
+    details the rules already matched costs no model time at all.
     """
-    people = name_candidates(ocr_text, model_id)
-    ner_names = [name for _score, name, _key in people]
+    people: list[tuple[float, str, str]] | None = None
 
     name = extract_full_name_rule(ocr_text, expected, name_mode)
     if is_present(name):
         name_source, name_key = "rule based", ""
     else:
+        # The rules found no name on this page, so escalate to NER: build the
+        # sentence around each patient-name key and read it with the model.
+        people = name_candidates(ocr_text, model_id)
         name, name_key = pick_name(
             people,
             expected["DummyFirstName"],
@@ -443,7 +467,7 @@ def extract_page_fields(
         "Detection_Source_MemberID": id_source,
         "ner_key_source_MemberID": id_key,
     }
-    return fields, ner_names
+    return fields, people
 
 
 def verify_page(expected: dict[str, str], name_mode: str, found_name: str, dob: str, member_id: str) -> bool:
@@ -528,7 +552,11 @@ def page_count_of(document: dict | None, pages: list[dict]) -> int:
         try:
             return int(document["pageCount"])
         except (TypeError, ValueError):
-            pass
+            logger.warning(
+                "pageCount %r in the OCR JSON is not a number; counting %s pages instead",
+                document.get("pageCount"),
+                len(pages),
+            )
     return len(pages)
 
 
@@ -557,10 +585,7 @@ def verify_record(
         # One batch CSV holds every record, so each NER hit has to carry the
         # record and page it was read from.
         reset_ner_log()
-        fields, ner_names = extract_page_fields(text, expected, name_mode, model_id)
-        ner_rows.extend(
-            {"RecordId": record_id, "Page_No": page_no, **row} for row in ner_log_rows()
-        )
+        fields, people = extract_page_fields(text, expected, name_mode, model_id)
         page_ok = verify_page(
             expected,
             name_mode,
@@ -568,6 +593,14 @@ def verify_record(
             fields["Detected_DOB"],
             fields["Detected_MemberID"],
         )
+        if not page_ok and people is None:
+            # The rules matched a name but the page still failed. Escalate to
+            # NER to find out whether another member is named on it.
+            people = name_candidates(text, model_id)
+        ner_rows.extend(
+            {"RecordId": record_id, "Page_No": page_no, **row} for row in ner_log_rows()
+        )
+        ner_names = [name for _score, name, _key in people or []]
         status = classify_page(text, ner_names, expected, name_mode, page_ok)
         rows.append(
             {
@@ -614,6 +647,59 @@ def _require_blob() -> tuple[str, str]:
     return blob_store.AZURE_STORAGE_CONTAINER, prefix
 
 
+# --- OCR source --------------------------------------------------------------
+#
+# The three seams the run reads its OCR through. They point at Azure Blob and
+# that is what production uses; run_local.py rebinds them to read the same JSON
+# off disk so the pipeline can be exercised without a storage account.
+
+
+def ocr_source() -> tuple[str, str]:
+    """Where OCR JSON is read from, as (container, prefix), for logs + queue.
+
+    Authenticates and warms the client up front, the way Azure_OCR does, so
+    the browser prompt happens once at the start rather than lazily part-way
+    through a long run.
+    """
+    container, prefix = _require_blob()
+    try:
+        blob_store.ensure_blob_ready()
+    except Exception as err:
+        logger.exception("Azure Blob auth failed")
+        raise SystemExit(f"Azure Blob auth failed: {err}") from err
+    return container, prefix
+
+
+def list_ocr_records() -> list[str]:
+    return blob_store.list_ocr_record_ids()
+
+
+def load_ocr_document(record_id: str) -> tuple[dict | None, list[dict]]:
+    """Read one record's OCR JSON, retrying a dropped connection.
+
+    Records take minutes of NER compute each, so the pooled HTTPS connection
+    sits idle in between and the service is entitled to close it. The next read
+    then fails on a stale socket; retrying gets a fresh one.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, BLOB_READ_ATTEMPTS + 1):
+        try:
+            return load_blob_document(record_id)
+        except Exception as exc:
+            last_error = exc
+            if attempt < BLOB_READ_ATTEMPTS:
+                logger.warning(
+                    "blob read for %s failed (%s); retry %s/%s in %ss",
+                    record_id,
+                    exc,
+                    attempt,
+                    BLOB_READ_ATTEMPTS,
+                    BLOB_READ_RETRY_SECONDS,
+                )
+                time.sleep(BLOB_READ_RETRY_SECONDS)
+    raise RuntimeError(f"could not read OCR JSON for {record_id}: {last_error}") from last_error
+
+
 def run(mode: str = "all") -> pd.DataFrame:
     """Work the verification queue, then write one batch of CSVs.
 
@@ -642,19 +728,28 @@ def run(mode: str = "all") -> pd.DataFrame:
         raise SystemExit(
             "NER weights missing for enabled model(s): "
             + ", ".join(absent)
-            + ". Download them with Models/model_downloader/__main__.py, or "
+            + ". Download them with "
+            "Member_Verification/Models/model_downloader/__main__.py, or "
             "disable them in .env (GLINER_LARGE / GLINER_MEDIUM / GLINER_LOW)."
         )
+    # Resolve and authenticate the OCR source before loading any model, so a
+    # bad prefix or a failed sign-in does not cost minutes of model loading.
+    container, prefix = ocr_source()
 
-    container, prefix = _require_blob()
+    # Weights on disk are not proof the model loads, so load each one now.
+    logger.info("loading %s NER model(s) ...", len(enabled_ids))
+    try:
+        ensure_loadable(enabled_ids)
+    except ModelLoadError as err:
+        logger.exception("NER model(s) could not be loaded")
+        raise SystemExit(f"NER model(s) could not be loaded: {err}") from err
+    logger.info("NER models ready: %s", enabled_ids)
     max_pages = int(mv_config.MAX_PAGES)
     record_ids = [
-        record_id
-        for record_id in blob_store.list_ocr_record_ids()
-        if record_id in system_rows
+        record_id for record_id in list_ocr_records() if record_id in system_rows
     ]
     record_source = f"{container}/{prefix}"
-    logger.info("OCR read from blob: %s", record_source)
+    logger.info("OCR read from: %s", record_source)
     logger.info("output root: %s", mv_config.Output_path)
     logger.info("mode=%s models=%s", mode, enabled_ids)
     if mode == "selected":
@@ -672,7 +767,7 @@ def run(mode: str = "all") -> pd.DataFrame:
         for record_id in remaining:
             _set_item_status(progress, record_id, "running", error=None)
             try:
-                document, pages = load_blob_document(record_id)
+                document, pages = load_ocr_document(record_id)
                 if not pages:
                     logger.info("skip %s (empty OCR JSON)", record_id)
                     _set_item_status(progress, record_id, "skipped", pageCount=0)
@@ -711,7 +806,21 @@ def run(mode: str = "all") -> pd.DataFrame:
             if item.get("status") == "running":
                 item["status"] = "pending"
         save_progress(progress)
-        logger.info("stopped; queue saved for resume (staged rows kept)")
+        done = sum(1 for item in progress.get("queue") or [] if item.get("status") == "done")
+        staged = staged_files()
+        # No batch folder exists yet: it is only written when the queue
+        # finishes. Say where the finished rows are so an interrupted run does
+        # not look like it produced nothing.
+        logger.info(
+            "stopped after %s/%s records. No batch folder was written yet -- "
+            "rows for the finished records are staged in %s (%s file(s)). "
+            "Rerun to carry on from here; the batch is written when the queue "
+            "completes.",
+            done,
+            progress.get("record_count"),
+            mv_config.STAGING_DIR,
+            len(staged),
+        )
         raise
     except Exception:
         progress["status"] = "error"
@@ -737,8 +846,15 @@ def run(mode: str = "all") -> pd.DataFrame:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    frame = run("all")
+    setup_logging()
+    try:
+        frame = run("all")
+    except SystemExit:
+        raise
+    except BaseException:
+        # Log the whole traceback where the run log will keep it, then stop.
+        logger.exception("member verification failed")
+        raise
     print(frame.to_string(index=False))
     return 0
 
