@@ -23,7 +23,8 @@ OCR_JSON_SUFFIX = "_final2.json"
 
 AZURE_POLL_TIMEOUT_SECONDS = 180
 # Up to this many record folders processed at once.
-PARALLEL_RECORDS = 10
+# Keep low to avoid Azure Blob connection-pool exhaustion (max=10).
+PARALLEL_RECORDS = 4
 # Hard cap on concurrent Azure Document Intelligence requests.
 MAX_AZURE_REQUESTS = 14
 

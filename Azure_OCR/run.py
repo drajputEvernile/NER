@@ -358,6 +358,12 @@ def main() -> int:
     except RuntimeError as err:
         raise SystemExit(str(err)) from err
 
+    # One login / one blob client before any parallel workers start.
+    try:
+        blob_store.ensure_blob_ready()
+    except Exception as err:
+        raise SystemExit(f"Azure Blob auth failed: {err}") from err
+
     parallel_records = max(1, int(azure_config.PARALLEL_RECORDS))
     max_azure = max(1, int(azure_config.MAX_AZURE_REQUESTS))
     _AZURE_SLOTS = threading.Semaphore(max_azure)

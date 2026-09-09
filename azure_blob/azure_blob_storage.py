@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 _CLIENT = None
+_CREDENTIAL = None
+_CLIENT_LOCK = threading.Lock()
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 _FILENAME_PARTS = re.compile(r"(\d+)")
@@ -102,6 +105,10 @@ def require_write_prefix() -> str:
 
 
 def _entra_credential():
+    global _CREDENTIAL
+    if _CREDENTIAL is not None:
+        return _CREDENTIAL
+
     from azure.identity import (
         AzureCliCredential,
         ChainedTokenCredential,
@@ -110,40 +117,75 @@ def _entra_credential():
     )
 
     cache = TokenCachePersistenceOptions(name="ner_blob_storage", allow_unencrypted_storage=True)
-    return ChainedTokenCredential(
-        AzureCliCredential(process_timeout=30),
+    # Browser-first with persistent cache so parallel workers reuse one login.
+    # Azure CLI is a fast path when available.
+    _CREDENTIAL = ChainedTokenCredential(
         InteractiveBrowserCredential(cache_persistence_options=cache),
+        AzureCliCredential(process_timeout=30),
     )
+    return _CREDENTIAL
 
 
 def blob_service_client():
+    """Return a process-wide BlobServiceClient (thread-safe singleton)."""
     global _CLIENT
     if _CLIENT is not None:
         return _CLIENT
 
-    from azure.storage.blob import BlobServiceClient
+    with _CLIENT_LOCK:
+        if _CLIENT is not None:
+            return _CLIENT
 
-    if use_entra():
-        if not AZURE_STORAGE_ACCOUNT_NAME:
-            raise RuntimeError("AZURE_STORAGE_ACCOUNT_NAME is required for Entra auth")
-        logger.info("blob auth=microsoft_entra account=%s", AZURE_STORAGE_ACCOUNT_NAME)
+        from azure.core.pipeline.transport import RequestsTransport
+        from azure.storage.blob import BlobServiceClient
+
+        # Parallel OCR downloads/uploads need more than the default pool of 10.
+        transport = RequestsTransport(connection_pool_maxsize=50)
+
+        if use_entra():
+            if not AZURE_STORAGE_ACCOUNT_NAME:
+                raise RuntimeError("AZURE_STORAGE_ACCOUNT_NAME is required for Entra auth")
+            logger.info("blob auth=microsoft_entra account=%s", AZURE_STORAGE_ACCOUNT_NAME)
+            _CLIENT = BlobServiceClient(
+                account_url=f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
+                credential=_entra_credential(),
+                transport=transport,
+            )
+            return _CLIENT
+
+        if AZURE_STORAGE_CONNECTION_STRING:
+            logger.info("blob auth=connection_string")
+            _CLIENT = BlobServiceClient.from_connection_string(
+                AZURE_STORAGE_CONNECTION_STRING,
+                transport=transport,
+            )
+            return _CLIENT
+
+        logger.info("blob auth=account_key account=%s", AZURE_STORAGE_ACCOUNT_NAME)
         _CLIENT = BlobServiceClient(
             account_url=f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
-            credential=_entra_credential(),
+            credential=AZURE_STORAGE_ACCOUNT_KEY,
+            transport=transport,
         )
         return _CLIENT
 
-    if AZURE_STORAGE_CONNECTION_STRING:
-        logger.info("blob auth=connection_string")
-        _CLIENT = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-        return _CLIENT
 
-    logger.info("blob auth=account_key account=%s", AZURE_STORAGE_ACCOUNT_NAME)
-    _CLIENT = BlobServiceClient(
-        account_url=f"https://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
-        credential=AZURE_STORAGE_ACCOUNT_KEY,
-    )
-    return _CLIENT
+def ensure_blob_ready() -> None:
+    """Authenticate once before parallel workers start.
+
+    Prevents multiple InteractiveBrowserCredential tabs / state-mismatch errors.
+    """
+    client = blob_service_client()
+    if use_entra():
+        logger.info("blob auth: acquiring token (browser may open once)...")
+        # Force a single token fetch before any worker threads run.
+        credential = _entra_credential()
+        credential.get_token("https://storage.azure.com/.default")
+        logger.info("blob auth: token ready")
+    # Touch the container so the first network call is also single-threaded.
+    container = client.get_container_client(AZURE_STORAGE_CONTAINER)
+    next(container.list_blobs(name_starts_with="", results_per_page=1), None)
+    logger.info("blob client ready container=%s", AZURE_STORAGE_CONTAINER)
 
 
 def container_client():
