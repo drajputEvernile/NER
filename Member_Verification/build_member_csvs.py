@@ -8,15 +8,15 @@ it only reshapes what the pipeline already produced.
   ner_source                  ner_{model}.csv from the same batch (optional;
                               needed only to put a confidence on NER values)
 
-Written into the output directory (by default the folder the verification CSV
-came from, so the tables sit beside the batch they describe):
+Written into OUTPUT_DIR, set in this file alongside the sources:
 
   member_list.csv                 one row per chart in the system data
   member_extraction_results.csv   one row per page
   member_verification_summary.csv one row per chart
 
-The three sources are set in this file, in the block below -- nothing here
-reads them from config.py or .env. Edit them and run:
+All four paths -- the three sources and the output directory -- are set in
+this file, in the block below. Nothing here reads them from config.py or .env.
+Edit them and run:
 
   .\\.venv\\Scripts\\python.exe Member_Verification\\build_member_csvs.py
 
@@ -70,10 +70,9 @@ NER_SOURCE = Path(
     r"E:\Projects\NER\Data\output\20260910_020156\ner_gliner_large.csv"
 )
 
-# Where the three CSVs are written. None puts them beside the verification CSV;
-# set a full path to send them elsewhere, e.g.
-#   OUTPUT_DIR = Path(r"E:\Projects\NER\Data\output\20260910_020156")
-OUTPUT_DIR: Path | None = None
+# Where the three CSVs are written. Created if it does not exist, and the three
+# filenames are fixed, so a re-run overwrites them in place.
+OUTPUT_DIR = Path(r"E:\Projects\NER\Data\output\20260910_020156")
 
 MEMBER_LIST_NAME = "member_list.csv"
 EXTRACTION_RESULTS_NAME = "member_extraction_results.csv"
@@ -575,8 +574,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--out",
-        default=str(OUTPUT_DIR or ""),
-        help="output directory (default: the folder the verification CSV is in)",
+        default=str(OUTPUT_DIR),
+        help="output directory for the three CSVs",
     )
     args = parser.parse_args(argv)
 
@@ -587,9 +586,13 @@ def main(argv: list[str] | None = None) -> int:
             "no member_verification_source: set MEMBER_VERIFICATION_SOURCE at the top "
             "of this file, or pass --member-verification-source"
         )
+    if not args.out:
+        raise SystemExit(
+            "no output directory: set OUTPUT_DIR at the top of this file, or pass --out"
+        )
     verification_source = Path(args.member_verification_source)
     ner_source = Path(args.ner_source) if args.ner_source else None
-    out_dir = Path(args.out) if args.out else verification_source.parent
+    out_dir = Path(args.out)
 
     written = build(
         Path(args.member_list_source),
