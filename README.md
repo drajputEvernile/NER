@@ -52,6 +52,18 @@ Verify what is already on disk without re-downloading:
 A verification run also loads every enabled model before it touches the queue,
 so a bad checkpoint stops the run instead of quietly detecting nothing.
 
+### Tokenizer warning on load
+
+transformers 5 warns `incorrect regex pattern ... will lead to incorrect
+tokenization` and suggests `fix_mistral_regex=True` whenever a local config
+carries no `transformers_version`, because it cannot then rule out a Mistral
+tokenizer. The DeBERTa-v3 encoders ship without that field, so it fired on
+every model load even though `model_type` is `deberta-v2` -- and taking the
+advice would install a Mistral pre-tokenizer and corrupt tokenization for
+real. `relink_local_paths` now fills the field in (only when `model_type`
+proves the model is not Mistral, so a genuine Mistral tokenizer still warns),
+which lets transformers skip the check itself. Nothing is suppressed.
+
 ## Python version
 
 Any Python from **3.12** upward works; `scipy` and `numpy` set the floor. The

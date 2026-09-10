@@ -108,13 +108,20 @@ def verify_loads(spec: dict, dest: Path) -> None:
     otherwise only shows up later as a run that detects nothing.
     """
     import os
+    import warnings
 
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    from gliner import GLiNER
 
-    print("  loading it to check it works ...")
-    model = GLiNER.from_pretrained(str(dest), local_files_only=True)
+    with warnings.catch_warnings():
+        # torch's own internal torch.jit.script call; nothing to switch here.
+        warnings.filterwarnings(
+            "ignore", message=r".*torch\.jit\.script.*", category=FutureWarning
+        )
+        from gliner import GLiNER
+
+        print("  loading it to check it works ...")
+        model = GLiNER.from_pretrained(str(dest), local_files_only=True)
     hits = model.predict_entities("Patient Name: Robert Smith", ["person"], threshold=0.3)
     names = [str(hit.get("text") or "") for hit in hits or []]
     if not names:

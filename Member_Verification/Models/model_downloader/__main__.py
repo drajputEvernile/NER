@@ -39,7 +39,7 @@ def download_all(*, force: bool = False, check_only: bool = False) -> list[str]:
     """Download (or just check) every model; return the ids that failed."""
     sys.path.insert(0, str(HERE.parent))
     from _common import verify_complete, verify_loads
-    from catalog import model_dir
+    from catalog import model_dir, relink_local_paths
 
     failed: list[str] = []
     for module in DOWNLOADERS:
@@ -49,6 +49,9 @@ def download_all(*, force: bool = False, check_only: bool = False) -> list[str]:
                 dest = model_dir(spec)
                 print(f"checking {spec['id']} at {dest}")
                 verify_complete(spec, dest)
+                # Same config normalisation the download path applies, so a
+                # check also repairs paths and metadata before loading.
+                relink_local_paths(dest)
                 verify_loads(spec, dest)
                 print(f"ok {spec['id']}")
             else:

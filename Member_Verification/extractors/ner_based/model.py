@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 from .config import MV_ROOT, NER_MODELS_PATH, enabled_model_ids
@@ -101,10 +102,19 @@ def unload() -> None:
 
 
 def _load_gliner(path: Path):
-    from gliner import GLiNER
+    # GLiNER's import calls torch.jit.script, which warns on newer torch. It is
+    # torch's own internal call, nothing this code can switch to torch.compile,
+    # so the one message is silenced rather than printed on every load.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*torch\.jit\.script.*",
+            category=FutureWarning,
+        )
+        from gliner import GLiNER
 
-    _relink(path)
-    return GLiNER.from_pretrained(str(path), local_files_only=True)
+        _relink(path)
+        return GLiNER.from_pretrained(str(path), local_files_only=True)
 
 
 def _load_hf_token(path: Path, spec: dict):
