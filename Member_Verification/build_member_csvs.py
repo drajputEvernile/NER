@@ -184,6 +184,11 @@ def present(value: object) -> str:
     return text if is_present(text) else ""
 
 
+def present_or_na(value: object) -> str:
+    """The detected value, or N/A when the field is blank."""
+    return present(value) or "N/A"
+
+
 # --- member_list -------------------------------------------------------------
 
 
@@ -373,9 +378,9 @@ def build_extraction_results(
                 "id": new_id(),
                 "chart_id": member["chart_id"],
                 "page_name": page_no,
-                "extracted_name": present(source_row.get("Detected_Full_Name")),
-                "extracted_dob": present(source_row.get("Detected_DOB")),
-                "extracted_member_id": present(source_row.get("Detected_MemberID")),
+                "extracted_name": present_or_na(source_row.get("Detected_Full_Name")),
+                "extracted_dob": present_or_na(source_row.get("Detected_DOB")),
+                "extracted_member_id": present_or_na(source_row.get("Detected_MemberID")),
                 "confidence": page_confidence(source_row, hits),
                 "provided_name": member["member_name"],
                 "provided_dob": member["member_dob"],
