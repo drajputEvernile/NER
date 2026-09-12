@@ -42,6 +42,8 @@ import config as mv_config
 
 sys.path.insert(0, str(HERE / "Rules"))
 
+from build_member_csvs import build as build_member_csvs
+
 from extractors.ner_based.dob import extract_dob_ner
 from extractors.ner_based.log import COLUMNS as _NER_LOG_COLUMNS
 from extractors.ner_based.log import reset as reset_ner_log
@@ -351,6 +353,26 @@ def finalize_batch(stamp: str | None = None) -> Path | None:
         logger.info("wrote %s", target)
     clear_staging()
     return batch_dir
+
+
+def build_member_csv_outputs(batch_dir: Path, model_ids: list[str]) -> None:
+    """Build the three derived member CSVs inside a completed batch folder."""
+    if len(model_ids) != 1:
+        raise SystemExit(
+            "build_member_csvs integration requires exactly one enabled NER model; "
+            f"enabled models: {', '.join(model_ids) or 'none'}"
+        )
+    model_id = model_ids[0]
+    verification_source = batch_dir / mv_config.mv_csv_name(model_id)
+    ner_source = batch_dir / mv_config.ner_csv_name(model_id)
+    written = build_member_csvs(
+        mv_config.System_Input_path,
+        verification_source,
+        ner_source,
+        batch_dir,
+    )
+    for path in written.values():
+        logger.info("wrote member CSV: %s", path)
 
 
 # --- verification ------------------------------------------------------------
@@ -835,10 +857,12 @@ def run(mode: str = "all") -> pd.DataFrame:
     if batch_dir is None:
         raise SystemExit(f"No verified records under {record_source}")
     logger.info("batch output: %s", batch_dir)
+    build_member_csv_outputs(batch_dir, enabled_ids)
 
     frames = [
-        pd.read_csv(path, encoding="utf-8-sig")
-        for path in sorted(batch_dir.glob(f"{mv_config.MV_CSV_PREFIX}_*.csv"))
+        pd.read_csv(batch_dir / mv_config.mv_csv_name(model_id), encoding="utf-8-sig")
+        for model_id in enabled_ids
+        if (batch_dir / mv_config.mv_csv_name(model_id)).is_file()
     ]
     if not frames:
         raise SystemExit(f"No verified records under {record_source}")
