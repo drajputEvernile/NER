@@ -21,7 +21,12 @@ def _weights_present(model_dir: Path) -> bool:
 
 
 def _retarget_local_encoder(model_dir: Path) -> None:
-    """Point GLiNER at the encoder beside the weights, not an old path."""
+    """Point GLiNER at the encoder beside the weights, not an old path.
+
+    Also bumps a stale ``transformers_version`` on non-Mistral encoders. Older
+    checkpoints ship ``\"4.0.0\"``, and transformers 5.x then falsely warns about
+    a Mistral regex when ``is_local`` is not detected during tokenizer init.
+    """
     encoder = (model_dir / "encoder").resolve()
     config_path = model_dir / "gliner_config.json"
     if config_path.is_file():
@@ -39,6 +44,15 @@ def _retarget_local_encoder(model_dir: Path) -> None:
             if key in data and data.get(key) != str(encoder):
                 data[key] = str(encoder)
                 changed = True
+        if name == "config.json":
+            model_type = str(data.get("model_type") or "").casefold()
+            mistral_types = {"mistral", "mistral3", "voxtral", "ministral", "pixtral"}
+            version = str(data.get("transformers_version") or "")
+            if model_type and model_type not in mistral_types:
+                # Any declared 5.x version skips the false-positive Mistral regex path.
+                if not version.startswith("5."):
+                    data["transformers_version"] = "5.13.1"
+                    changed = True
         if changed:
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
