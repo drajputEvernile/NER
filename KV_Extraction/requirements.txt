@@ -1,4 +1,4 @@
-# KV_Extraction
+# KV_Extraction local runners
 pillow>=12.0.0
 gliner>=0.2.21
 sentencepiece>=0.2.0
@@ -6,8 +6,4 @@ protobuf>=4.25.0
 transformers>=4.51.3,<5.14.0
 huggingface_hub>=0.26.0
 pandas>=2.2.0
-
-# Azure Blob (Azure_OCR / azure_blob)
-azure-storage-blob>=12.19.0
-azure-identity>=1.17.0
-azure-core>=1.30.0
+torch>=2.0.0

@@ -1,6 +1,7 @@
 """Shared Azure Blob Storage helpers (Entra auth).
 
-Used by Azure_OCR (read raw images + write OCR JSON) and Member_Verification (read OCR JSON).
+Used by Azure_OCR (read raw images + write OCR JSON once per record) and
+Member Verification / MV_V2 (read OCR JSON).
 
 Blob path prefixes come only from the repo-root .env:
   AZURE_OCR_RAW_STORAGE_PREFIX   — raw record image folders
@@ -239,6 +240,19 @@ def list_raw_record_ids() -> list[str]:
     return record_ids
 
 
+def list_json_blobs(prefix: str) -> list[str]:
+    """JSON blob names under an explicit prefix (not the old OCR env prefixes)."""
+    client = container_client()
+    cleaned = str(prefix or "").strip().strip("/")
+    base = f"{cleaned}/" if cleaned else ""
+    names = [
+        str(blob.name)
+        for blob in client.list_blobs(name_starts_with=base)
+        if str(blob.name or "").lower().endswith(".json")
+    ]
+    return sorted(names)
+
+
 def list_ocr_record_ids() -> list[str]:
     """Record folders under AZURE_OCR_STORAGE_WRITE_PREFIX."""
     prefix = require_write_prefix()
@@ -269,6 +283,26 @@ def list_raw_page_blobs(record_id: str) -> list[tuple[str, str]]:
         pages.append((relative, name))
     pages.sort(key=lambda item: filename_sort_key(item[0]))
     return pages
+
+
+def download_record_images(record_id: str) -> list[tuple[str, str, bytes]]:
+    """Download every image in a raw record folder into memory.
+
+    Returns sorted (file_name, blob_name, image_bytes) tuples. Hold the list only
+    until that record's OCR JSON has been written, then discard it.
+    """
+    pages = list_raw_page_blobs(record_id)
+    downloaded: list[tuple[str, str, bytes]] = []
+    for index, (file_name, blob_name) in enumerate(pages, start=1):
+        logger.info(
+            "blob download record=%s page=%s/%s file=%s",
+            record_id,
+            index,
+            len(pages),
+            file_name,
+        )
+        downloaded.append((file_name, blob_name, download_bytes(blob_name)))
+    return downloaded
 
 
 def upload_json(blob_name: str, data: dict) -> None:

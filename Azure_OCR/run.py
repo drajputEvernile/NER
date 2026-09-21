@@ -1,7 +1,9 @@
 """OCR images from Azure Blob raw prefix; write JSON to OCR write prefix.
 
 Builds a queue in azure_ocr_progress.json (folder tally + page counts), then
-processes one record at a time, one page at a time (no parallel workers).
+processes one record at a time: download the full record folder into memory,
+OCR every pending page from those bytes, and upload the OCR JSON once when the
+record is complete.
 
 Prefixes come only from repo-root .env:
   AZURE_OCR_RAW_STORAGE_PREFIX
@@ -197,17 +199,6 @@ def _set_item_status(progress: dict, record_id: str, status: str, **extra) -> No
     save_progress(progress)
 
 
-def _mark_page_done(progress: dict, record_id: str, file_name: str) -> None:
-    item = _queue_item(progress, record_id)
-    if item is None:
-        return
-    done = list(item.get("pages_done") or [])
-    if file_name not in done:
-        done.append(file_name)
-    item["pages_done"] = sorted(done)
-    save_progress(progress)
-
-
 def pending_records(progress: dict) -> list[str]:
     return [
         str(item.get("recordId") or "")
@@ -249,12 +240,14 @@ def ocr_record(
     progress: dict,
     extractor: AzureReadOcrExtractor,
 ) -> None:
+    """Download the record folder, OCR in memory, write the OCR JSON once."""
     _set_item_status(progress, record_id, "running", error=None)
     logger.info("start record %s (%s/%s)", record_id, folder_no, folder_count)
+    images: list[tuple[str, str, bytes]] = []
 
     try:
-        pages = blob_store.list_raw_page_blobs(record_id)
-        if not pages:
+        page_list = blob_store.list_raw_page_blobs(record_id)
+        if not page_list:
             logger.info("skip %s (no page images)", record_id)
             _set_item_status(progress, record_id, "done", pages_done=[])
             return
@@ -264,43 +257,62 @@ def ocr_record(
         item = _queue_item(progress, record_id)
         if item is not None:
             item["pages_done"] = sorted(already)
-            item["pageCount"] = len(pages)
+            item["pageCount"] = len(page_list)
             save_progress(progress)
 
-        pending = [
-            (page_number, file_name, blob_name)
-            for page_number, (file_name, blob_name) in enumerate(pages, start=1)
-            if file_name not in already
-        ]
-        if not pending:
+        raw_names = {file_name for file_name, _blob in page_list}
+        if raw_names and raw_names <= already:
             _set_item_status(progress, record_id, "done", pages_done=sorted(already))
             logger.info("finished record %s (already complete)", record_id)
             return
 
-        for page_number, file_name, blob_name in pending:
+        logger.info(
+            "download record %s pages=%s into memory",
+            record_id,
+            len(page_list),
+        )
+        images = blob_store.download_record_images(record_id)
+        by_name = {file_name: page for page in document.get("pages") or [] if page.get("fileName")}
+        built_pages: list[dict] = []
+
+        for page_number, (file_name, _blob_name, image_bytes) in enumerate(images, start=1):
+            if file_name in already and file_name in by_name:
+                logger.info(
+                    "reuse page %s/%s folder %s/%s record=%s file=%s",
+                    page_number,
+                    len(images),
+                    folder_no,
+                    folder_count,
+                    record_id,
+                    file_name,
+                )
+                built_pages.append(by_name[file_name])
+                continue
             logger.info(
                 "ocr page %s/%s folder %s/%s record=%s file=%s",
                 page_number,
-                len(pages),
+                len(images),
                 folder_no,
                 folder_count,
                 record_id,
                 file_name,
             )
-            image_bytes = blob_store.download_bytes(blob_name)
-            page = extractor.extract_page_bytes(image_bytes, file_name, page_number)
-            document["pages"] = [item for item in document["pages"] if item.get("fileName") != file_name]
-            document["pages"].append(page)
-            # save_ocr_document sorts by fileName ascending and renumbers pageNumber
-            save_document(record_id, document)
-            _mark_page_done(progress, record_id, file_name)
+            built_pages.append(extractor.extract_page_bytes(image_bytes, file_name, page_number))
 
-        _set_item_status(progress, record_id, "done")
+        document["recordId"] = record_id
+        document["model"] = "prebuilt-read"
+        document["pages"] = built_pages
+        save_document(record_id, document)
+        done_names = sorted(done_file_names(document))
+        _set_item_status(progress, record_id, "done", pages_done=done_names)
         logger.info("finished record %s (%s/%s)", record_id, folder_no, folder_count)
     except Exception as exc:
         logger.exception("record %s failed: %s", record_id, exc)
+        # No partial OCR JSON upload. Whole record is retried on the next run.
         _set_item_status(progress, record_id, "error", error=str(exc))
         raise
+    finally:
+        images.clear()
 
 
 def main() -> int:
@@ -334,7 +346,7 @@ def main() -> int:
         blob_store.AZURE_STORAGE_CONTAINER,
         write_prefix,
     )
-    logger.info("mode=sequential (one record, one page at a time)")
+    logger.info("mode=one write per record (download folder, OCR in memory, upload JSON once)")
 
     progress = load_progress()
     queue = list(progress.get("queue") or [])

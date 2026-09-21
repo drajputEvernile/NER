@@ -1,18 +1,26 @@
 # Secrets
 .env
+V1_MV
+V1 Code
+Azure V2
+Azure V2.zip
+azure_blob
+Azure_OCR
+Models
 
 # Data
 Data/
 
-# Local NER weights (Member_Verification/Models/), plus the HF cache dirs
-Member_Verification/Models/gliner_large-v2.1/
-Member_Verification/Models/gliner_medium-v2.1/
-Member_Verification/Models/gliner_low/
+# Local NER weights, plus the HF cache dirs
+V1_MV/Models/gliner_large-v2.1/
+V1_MV/Models/gliner_medium-v2.1/
+V1_MV/Models/gliner_low/
+Models/gliner_low/
 
 # Local queue / progress + batch staging
 Azure_OCR/azure_ocr_progress.json
-Member_Verification/mv_progress.json
-Member_Verification/mv_staging/
+V1_MV/mv_progress.json
+V1_MV/mv_staging/
 
 # Python
 __pycache__/

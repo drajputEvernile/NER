@@ -116,7 +116,7 @@ def main() -> int:
         _run.blob_store.AZURE_STORAGE_CONTAINER,
         write_prefix,
     )
-    logger.info("mode=sequential (one record, one page at a time), max_pages=%s", MAX_PAGES)
+    logger.info("mode=one write per record (download folder, OCR in memory, upload JSON once), max_pages=%s", MAX_PAGES)
 
     progress = load_existing_progress()
     queue = list(progress.get("queue") or [])

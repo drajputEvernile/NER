@@ -3,7 +3,7 @@
 OCR chart pages, then rule-based + NER member verification. Run every command from the repo root with the repo `.venv`.
 
 ```powershell
-python -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 copy .env.example .env
 ```
@@ -12,30 +12,40 @@ copy .env.example .env
 
 | Folder | Role |
 |---|---|
-| `Azure_OCR/` | Azure Document Intelligence → blob OCR JSON |
-| `Docling_OCR/` | Local Docling OCR → `Data/output/...` |
-| `Member_Verification/` | Verification (reads OCR JSON from blob, or locally) |
-| `Member_Verification/Models/` | NER weights, `catalog.py` + `model_downloader/` |
+| `KV_Extraction/` | Key/value extraction (name, DOB, member ID) from local OCR + raw images |
+| `Azure_OCR/` | Azure Document Intelligence OCR from blob |
+| `V1_MV/` | Previous verification code |
+| `Models/` | GLiNER weights used by `KV_Extraction` |
 | `azure_blob/` | Shared blob helpers |
 
-Blob path prefixes live only in `.env` (`AZURE_OCR_RAW_STORAGE_PREFIX`, `AZURE_OCR_STORAGE_WRITE_PREFIX`).
+`KV_Extraction` is local-only. Paths are in `KV_Extraction/Util/config.py` (`Raw_Input`, `OCR_Input`, `Local_Output`, `Ner_Model_Path`).
+
+## Run KV extraction
+
+```powershell
+.\.venv\Scripts\python.exe KV_Extraction\run_dob_extraction.py
+.\.venv\Scripts\python.exe KV_Extraction\run_id_extraction.py
+.\.venv\Scripts\python.exe KV_Extraction\run_name_extraction.py
+```
+
+Each run writes `{Local_Output}/{Field}_Extraction_{timestamp}/` with the field CSV, summary CSV, and `overlays/`. GLiNER medium is loaded from `Models/gliner_medium-v2.1` by default.
 
 ## Download NER models
 
-Weights live next to the catalog in `Member_Verification/Models/`, and that is
+Weights live next to the catalog in `V1_MV/Models/`, and that is
 the only place the runtime looks for them.
 
 ```powershell
 $env:HF_HUB_DISABLE_XET='1'
-.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\__main__.py
+.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\__main__.py
 ```
 
 Individual models:
 
 ```powershell
-.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\gliner_large_v2_1.py
-.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\gliner_medium_v2_1.py
-.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\gliner_low.py
+.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\gliner_large_v2_1.py
+.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\gliner_medium_v2_1.py
+.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\gliner_low.py
 ```
 
 Each model is downloaded, checked for completeness, then **loaded and asked to
@@ -46,7 +56,7 @@ exits non-zero.
 Verify what is already on disk without re-downloading:
 
 ```powershell
-.\.venv\Scripts\python.exe Member_Verification\Models\model_downloader\__main__.py --check
+.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\__main__.py --check
 ```
 
 A verification run also loads every enabled model before it touches the queue,
@@ -94,30 +104,30 @@ Pages are saved sorted by `fileName` ascending (`pageNumber` = 1..N).
 Reads OCR from blob (`AZURE_OCR_STORAGE_WRITE_PREFIX`).
 
 ```powershell
-.\.venv\Scripts\python.exe Member_Verification\run.py
+.\.venv\Scripts\python.exe V1_MV\run.py
 ```
 
 Selected docs only (page count ≤ `MAX_PAGES` in `.env`):
 
 ```powershell
-.\.venv\Scripts\python.exe Member_Verification\run_selected.py
+.\.venv\Scripts\python.exe V1_MV\run_selected.py
 ```
 
 Against OCR JSON on disk instead of blob (same pipeline, no storage account
 needed — this is how to exercise the app locally):
 
 ```powershell
-.\.venv\Scripts\python.exe Member_Verification\run_local.py
-.\.venv\Scripts\python.exe Member_Verification\run_local.py --records Test1,Test2
-.\.venv\Scripts\python.exe Member_Verification\run_local.py --root Data\output --mode selected
+.\.venv\Scripts\python.exe V1_MV\run_local.py
+.\.venv\Scripts\python.exe V1_MV\run_local.py --records Test1,Test2
+.\.venv\Scripts\python.exe V1_MV\run_local.py --root Data\output --mode selected
 ```
 
 It reads `{root}/{RecordId}/Azure_OCR_Output/{RecordId}.json`, falling back to
 `Docling_OCR_Output/` and then `{root}/{RecordId}.json`.
 
 Like Azure OCR, the run first tallies the records into a queue
-(`Member_Verification/mv_progress.json`) and then works through it **one record
-at a time**. Rows are staged in `Member_Verification/mv_staging/` as records
+(`V1_MV/mv_progress.json`) and then works through it **one record
+at a time**. Rows are staged in `V1_MV/mv_staging/` as records
 finish, so stopping and rerunning resumes where it left off.
 
 Output is written **batch-wise** at the end of the run: one folder named after
@@ -131,7 +141,7 @@ Default root: `E:\Projects\NER\Data\output`
 
 The batch folder is written **when the queue finishes**. Stop a run part-way
 and there is no folder yet -- the rows for the records that did finish sit in
-`Member_Verification/mv_staging/`, and the log says so on exit. Rerun to carry
+`V1_MV/mv_staging/`, and the log says so on exit. Rerun to carry
 on and the batch is written then.
 
 Any failure stops the run and logs the full traceback: a model that will not
@@ -153,9 +163,53 @@ a batch folder holds six files:
   member_verification_gliner_low.csv      ner_gliner_low.csv
 ```
 
+## Build the member CSVs
+
+`V1_MV/build_member_csvs.py` is standalone: it re-shapes the
+system data and a finished batch into three tables. It never re-runs
+verification.
+
+| Source | What it is |
+|---|---|
+| `member_list_source` | the system data (`system_input.csv`) |
+| `member_verification_source` | `member_verification_{model}.csv` from a batch |
+| `ner_source` | `ner_{model}.csv` from the same batch, for NER confidences |
+
+The three are set in an **input sources** block at the top of the script, not
+in `config.py` or `.env`. Point both batch sources at the same batch and model:
+their rows are joined on chart and page, so mixing them would line up the wrong
+pages. Then just run it:
+
+```powershell
+.\.venv\Scripts\python.exe V1_MVuild_member_csvs.py
+```
+
+`--member-list-source`, `--member-verification-source`, `--ner-source` and
+`--out` override those values for one run. `OUTPUT_DIR` is created if it does
+not exist, and the three filenames are fixed, so a re-run overwrites them in
+place:
+
+- `member_list.csv` — one row per chart in the system data
+- `member_extraction_results.csv` — one row per page
+- `member_verification_summary.csv` — one row per chart
+
+**Confidence.** A value the rules matched scores a draw from
+`RULE_BASED_CONFIDENCE_RANGE` (0.92-0.98), taken per field, so a rules hit does
+not read as absolute certainty. An NER value scores the mean of the hits it was
+built from — the NER CSV records raw
+hits while the reported value is merged and trimmed, so `Benjamin` (0.9809) +
+`Benjamin` (0.9898) become `Benjamin Benjamin` at `0.9853`. A page's
+`confidence` is the mean over the fields that hold a value; fields with nothing
+detected are left out rather than counted as zero, and a page with no
+detections is `0`. A chart's `confidence` is the mean over its pages.
+
+`NER_SOURCE` may only be `None` for a batch with no NER detections at all;
+otherwise the run stops, because writing `0` for an unscored NER value would
+read as "nothing detected".
+
 ## Accept / reject rules
 
-Each page lands in one bucket (`Member_Verification/Rules/what_if_rules.py`):
+Each page lands in one bucket (`V1_MV/Rules/what_if_rules.py`):
 
 | Bucket | Meaning | Counts against the document |
 |---|---|---|
