@@ -37,24 +37,22 @@ type AccuracyStats = {
   ESig: number | null;
 };
 
-/** Percent of reviewed key/value judgments marked correct. Null when nothing reviewed yet. */
+/** Accuracy is per key–value pair: both must be correct to count as accurate. */
+function isHitReviewed(hit: Hit): boolean {
+  return !!hit.key_accuracy && !!hit.value_accuracy;
+}
+
+function isHitCorrect(hit: Hit): boolean {
+  return hit.key_accuracy === "correct" && hit.value_accuracy === "correct";
+}
+
 function computeAccuracy(hits: Hit[]): AccuracyStats {
   function pct(field?: string): number | null {
     const subset = field ? hits.filter((hit) => hit.field === field) : hits;
-    let total = 0;
-    let correct = 0;
-    for (const hit of subset) {
-      if (hit.key_accuracy) {
-        total += 1;
-        if (hit.key_accuracy === "correct") correct += 1;
-      }
-      if (hit.value_accuracy) {
-        total += 1;
-        if (hit.value_accuracy === "correct") correct += 1;
-      }
-    }
-    if (!total) return null;
-    return Math.round((correct / total) * 100);
+    const reviewed = subset.filter(isHitReviewed);
+    if (!reviewed.length) return null;
+    const correct = reviewed.filter(isHitCorrect).length;
+    return Math.round((correct / reviewed.length) * 100);
   }
   return {
     overall: pct(),
@@ -64,6 +62,17 @@ function computeAccuracy(hits: Hit[]): AccuracyStats {
     PName: pct("PName"),
     ESig: pct("ESig"),
   };
+}
+
+type DocStatus = "Pending" | "InProgress" | "Reviewed";
+
+function documentStatus(doc: DocumentRow): DocStatus {
+  const hits = doc.pages.flatMap((pageRow) => pageRow.hits);
+  if (!hits.length) return "Pending";
+  const reviewed = hits.filter(isHitReviewed).length;
+  if (reviewed === 0) return "Pending";
+  if (reviewed >= hits.length) return "Reviewed";
+  return "InProgress";
 }
 
 function formatAccuracyLine(stats: AccuracyStats): string {
@@ -396,23 +405,34 @@ export default function App() {
               <ul className="job-list">
                 {loading && <li className="empty">Loading…</li>}
                 {!loading &&
-                  run?.documents.map((item) => (
-                    <li key={item.record_id} className="job-row">
-                      <button
-                        type="button"
-                        className={`job-item ${doc?.record_id === item.record_id ? "active" : ""}`}
-                        onClick={() => selectDoc(item)}
-                      >
-                        <div className="job-item-top">
-                          <span className="job-name" title={item.record_id}>
-                            {item.record_id}
-                          </span>
-                          <span className="pill pill-done">{item.pages.length} pg</span>
-                        </div>
-                        <div className="job-meta">{item.page_count || item.pages.length} pages</div>
-                      </button>
-                    </li>
-                  ))}
+                  run?.documents.map((item) => {
+                    const status = documentStatus(item);
+                    const pillClass =
+                      status === "Reviewed"
+                        ? "pill-complete"
+                        : status === "InProgress"
+                          ? "pill-processing"
+                          : "pill-queued";
+                    return (
+                      <li key={item.record_id} className="job-row">
+                        <button
+                          type="button"
+                          className={`job-item ${doc?.record_id === item.record_id ? "active" : ""}`}
+                          onClick={() => selectDoc(item)}
+                        >
+                          <div className="job-item-top">
+                            <span className="job-name" title={item.record_id}>
+                              {item.record_id}
+                            </span>
+                            <span className={`pill ${pillClass}`} title={status}>
+                              {status}
+                            </span>
+                          </div>
+                          <div className="job-meta">{item.pages.length} pages</div>
+                        </button>
+                      </li>
+                    );
+                  })}
                 {!loading && !run?.documents.length && <li className="empty">No files yet</li>}
               </ul>
             )}
