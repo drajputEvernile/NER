@@ -34,5 +34,18 @@ venv/
 .cache/
 **/.cache/
 
+# Node / Review UI frontend
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+**/.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
 iMGE
 rawi
