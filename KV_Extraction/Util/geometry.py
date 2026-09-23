@@ -8,6 +8,8 @@ HEADER_FRAC = 0.30
 FOOTER_FRAC = 0.30
 CLUSTER_Y_FRAC = 0.12
 CLUSTER_X_FRAC = 0.40
+# Keyless name band: ±5% page height (also used for Patient-key proximity).
+KEYLESS_BAND_FRAC = 0.05
 
 WEAK_KEYS = frozenset({"name", "patient"})
 
@@ -137,3 +139,25 @@ def near(left: Box, right: Box, page_w: float, page_h: float) -> bool:
         abs(left.cx - right.cx) <= CLUSTER_X_FRAC * page_w
         and abs(left.cy - right.cy) <= CLUSTER_Y_FRAC * page_h
     )
+
+
+def near_keyless(left: Box, right: Box, page_w: float, page_h: float) -> bool:
+    """True when boxes fall inside each other's keyless vertical band (full width)."""
+    del page_w
+    pad = KEYLESS_BAND_FRAC * page_h if page_h else 8.0
+    left_top = left.top - pad
+    left_bottom = left.bottom + pad
+    right_top = right.top - pad
+    right_bottom = right.bottom + pad
+    return left_top <= right_bottom and right_top <= left_bottom
+
+
+def boxes_overlap(left: tuple[float, float, float, float] | Box, right: Box | None) -> bool:
+    """Axis-aligned overlap between a band tuple/box and a key value box."""
+    if right is None:
+        return False
+    if isinstance(left, Box):
+        a_left, a_top, a_right, a_bottom = left.left, left.top, left.right, left.bottom
+    else:
+        a_left, a_top, a_right, a_bottom = left
+    return not (a_right < right.left or a_left > right.right or a_bottom < right.top or a_top > right.bottom)

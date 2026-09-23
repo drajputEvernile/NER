@@ -14,20 +14,13 @@ from Provider_Name.extract import (
     key_span,
     nearest_provider,
 )
+from Util.dates import find_dates, normalize_date
 from Util.keys import KeyHit
 from Util.model import predict
 from Util.window import expand_for_key
 
 LABELS = ["person", "date"]
 _CLEAN = re.compile(r"\s+")
-_DATE = re.compile(
-    r"\b("
-    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?"
-    r"|"
-    r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
-    r")\b",
-    flags=re.IGNORECASE,
-)
 
 
 @dataclass
@@ -46,21 +39,7 @@ class ESigHit:
 
 
 def _normalize_date(raw: str) -> str:
-    text = _CLEAN.sub(" ", (raw or "").strip()).rstrip(".,;")
-    if not text:
-        return ""
-    # Keep calendar date; drop trailing clock when present after slash/dash dates.
-    iso = re.match(
-        r"^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)?$",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if iso:
-        return iso.group(1)
-    slash = re.match(r"^(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text)
-    if slash:
-        return slash.group(1)
-    return text
+    return normalize_date(raw)
 
 
 def _date_gap(
@@ -95,14 +74,14 @@ def nearest_signature_date(
     text = sentence or ""
     if key_at is None:
         return "", 0.0
-    matches = list(_DATE.finditer(text))
+    matches = list(find_dates(text))
     if not matches:
         return "", 0.0
     chosen = min(
         matches,
         key=lambda match: _date_gap(text, key_at, (match.start(), match.end()), after),
     )
-    value = _normalize_date(chosen.group(1))
+    value = normalize_date(chosen.group(1))
     if not value:
         return "", 0.0
     score = geometry_confidence(_date_gap(text, key_at, (chosen.start(), chosen.end()), after)[1])

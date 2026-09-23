@@ -5,13 +5,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from Util.dates import find_dates, normalize_date
 from Util.keys import KeyHit
 from Util.model import predict
 
 LABELS = ["date", "date of birth"]
 _CLEAN = re.compile(r"\s+")
 _HAS_DIGIT = re.compile(r"\d")
-_DATE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
 _TIME_AFTER = re.compile(r"\s+\d{1,2}:\d{2}\b")
 _FUZZY_DOB = re.compile(r"(?i)d[o0][bg]")
 
@@ -65,21 +65,24 @@ def _gap(sentence: str, key_at: tuple[int, int], date_at: tuple[int, int]) -> tu
 
 
 def nearest_date(sentence: str, key: str, raws: list[dict] | None = None) -> tuple[str, float]:
-    """Numeric date closest to the key. A date followed by a time loses a tie."""
+    """Date closest to the key (numeric or month-name). Time after the date loses a tie."""
     text = sentence or ""
     key_at = _key_span(text, key)
-    dates = list(_DATE.finditer(text))
+    dates = find_dates(text)
     if not dates or key_at is None:
         return "", 0.0
     chosen = min(dates, key=lambda match: _gap(text, key_at, (match.start(), match.end())))
+    value = normalize_date(chosen.group(1))
+    if not value:
+        return "", 0.0
     score = 0.0
     for raw in raws or []:
         span = str(raw.get("text") or "")
-        if chosen.group(0).casefold() in span.casefold():
+        if value.casefold() in span.casefold() or chosen.group(0).casefold() in span.casefold():
             score = max(score, float(raw.get("score") or 0))
     if score <= 0:
         score = max(0.55, 0.92 - 0.12 * _gap(text, key_at, (chosen.start(), chosen.end()))[0])
-    return chosen.group(0), round(score, 4)
+    return value, round(score, 4)
 
 
 def extract_box(hit: KeyHit) -> DobHit:
@@ -91,7 +94,9 @@ def extract_box(hit: KeyHit) -> DobHit:
     for raw in raws:
         ner_text = str(raw.get("text") or "").strip()
         accepted = _accept(ner_text)
-        if not value or not accepted or value.casefold() not in accepted.casefold():
+        if not value or not accepted:
+            continue
+        if value.casefold() not in accepted.casefold() and accepted.casefold() not in value.casefold():
             continue
         raw_score = float(raw.get("score") or 0)
         if raw_score > best_score:

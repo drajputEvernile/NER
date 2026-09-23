@@ -17,6 +17,7 @@ from .geometry import (
     Word,
     median_height,
     near,
+    near_keyless,
     region_of,
     union_boxes,
 )
@@ -41,6 +42,11 @@ _FUZZY = {
     "dob": re.compile(r"(?i)^d[o0][bg][:#.]?$"),
     "mrn": re.compile(r"(?i)^m[ar]n[:#.]?$"),
 }
+
+# Bare "Birth" is not DOB when followed by these, or when "age of first birth".
+_DOB_BAD_AFTER = frozenset({"place", "order", "sex"})
+# Bare "Name" is only a name key when the prior word is one of these (or absent).
+_NAME_OK_BEFORE = frozenset({"legal", "preferred", "person", "patient"})
 
 
 @dataclass
@@ -84,6 +90,12 @@ def load_catalog() -> dict[str, list[str]]:
     return _CATALOG
 
 
+def reset_catalog() -> None:
+    """Drop the cached key catalog (tests / hot-reload)."""
+    global _CATALOG
+    _CATALOG = None
+
+
 def _parts(text: str) -> list[str]:
     return _PARTS.findall(text.casefold())
 
@@ -125,6 +137,55 @@ def _same_line(words: list[Word], indexes: list[int]) -> bool:
     return max(centers) - min(centers) <= max(height * 0.8, 4.0)
 
 
+def _neighbor_parts(words: list[Word], indexes: list[int]) -> tuple[list[str], list[str]]:
+    """Token parts immediately before / after the matched key span."""
+    positions = {word.index: position for position, word in enumerate(words)}
+    first = positions.get(indexes[0])
+    last = positions.get(indexes[-1])
+    before: list[str] = []
+    after: list[str] = []
+    if first is not None and first > 0:
+        before = _parts(words[first - 1].content)
+    if last is not None and last + 1 < len(words):
+        after = _parts(words[last + 1].content)
+    # Also peek two words back for "age of first birth".
+    if first is not None and first >= 3:
+        before = _parts(words[first - 3].content) + _parts(words[first - 2].content) + before
+    elif first is not None and first >= 2:
+        before = _parts(words[first - 2].content) + before
+    return before, after
+
+
+def _dob_context_ok(words: list[Word], indexes: list[int], key: str) -> bool:
+    """Reject Birth Place / Birth Order / Birth Sex / age of first birth."""
+    parts = _parts(key)
+    before, after = _neighbor_parts(words, indexes)
+    # Only bare "Birth" (and fuzzy) is blocked by Place/Order/Sex.
+    if parts == ["birth"] and after and after[0] in _DOB_BAD_AFTER:
+        return False
+    if "birth" in parts:
+        tail = before[-3:] if len(before) >= 3 else before
+        if tail == ["age", "of", "first"]:
+            return False
+        if "age" in before and "first" in before:
+            return False
+    return True
+
+
+def _name_context_ok(words: list[Word], indexes: list[int], key: str) -> bool:
+    """Bare Name only if prior word is Legal/Preferred/Person/Patient (or none)."""
+    if _parts(key) != ["name"]:
+        return True
+    positions = {word.index: position for position, word in enumerate(words)}
+    first = positions.get(indexes[0])
+    if first is None or first <= 0:
+        return True
+    prior = _parts(words[first - 1].content)
+    if not prior:
+        return True
+    return prior[-1] in _NAME_OK_BEFORE
+
+
 def _fuzzy_matches(words: list[Word], key: str) -> list[list[int]]:
     """Whole-token OCR typos such as DOG for DOB, including dotted D.O.B keys."""
     pattern = _FUZZY.get("".join(_parts(key)))
@@ -133,7 +194,7 @@ def _fuzzy_matches(words: list[Word], key: str) -> list[list[int]]:
     return [[word.index] for word in words if pattern.fullmatch(word.content.strip())]
 
 
-def _match_key(words: list[Word], stream: list[tuple[str, int]], key: str) -> list[list[int]]:
+def _match_key(words: list[Word], stream: list[tuple[str, int]], key: str, field: str) -> list[list[int]]:
     parts = _parts(key)
     if not parts:
         return []
@@ -149,9 +210,17 @@ def _match_key(words: list[Word], stream: list[tuple[str, int]], key: str) -> li
             if not indexes or indexes[-1] != word_index:
                 indexes.append(word_index)
         accepted = _with_hash(words, indexes, need_hash)
-        if accepted is not None and _same_line(words, accepted):
-            found.append(accepted)
-    found.extend(_fuzzy_matches(words, key))
+        if accepted is None or not _same_line(words, accepted):
+            continue
+        if field == "dob" and not _dob_context_ok(words, accepted, key):
+            continue
+        if field == "name" and not _name_context_ok(words, accepted, key):
+            continue
+        found.append(accepted)
+    for indexes in _fuzzy_matches(words, key):
+        if field == "dob" and not _dob_context_ok(words, indexes, key):
+            continue
+        found.append(indexes)
     return found
 
 
@@ -170,7 +239,7 @@ def find_key_hits(words: list[Word], page_w: float, page_h: float) -> list[KeyHi
     hits: list[KeyHit] = []
 
     for field, key in _longest_first(catalog):
-        for indexes in _match_key(words, stream, key):
+        for indexes in _match_key(words, stream, key, field):
             if any(index in occupied for index in indexes):
                 continue
             key_words = [by_index[index] for index in indexes if index in by_index]
@@ -235,6 +304,21 @@ def _strong_in_same_band(hits: list[KeyHit], group: list[int], hit: KeyHit) -> b
     return any(not hits[index].weak and _band(hits[index].region) == band for index in group)
 
 
+def _patient_has_nearby_key(hits: list[KeyHit], index: int, page_w: float, page_h: float) -> bool:
+    """Patient is trusted only when a DOB/ID/other name key sits in the keyless band."""
+    patient = hits[index]
+    for other_index, other in enumerate(hits):
+        if other_index == index:
+            continue
+        if other.field not in {"dob", "member_id", "name"}:
+            continue
+        if other.key.casefold() == "patient":
+            continue
+        if near_keyless(patient.box, other.box, page_w, page_h):
+            return True
+    return False
+
+
 def _mark_trusted(hits: list[KeyHit], page_w: float, page_h: float) -> None:
     if not hits:
         return
@@ -242,6 +326,14 @@ def _mark_trusted(hits: list[KeyHit], page_w: float, page_h: float) -> None:
         clustered = len(group) >= 2
         for index in group:
             hit = hits[index]
+            # Patient: require another key within keyless-band proximity.
+            if hit.key.casefold() == "patient" and hit.field == "name":
+                if not _patient_has_nearby_key(hits, index, page_w, page_h):
+                    continue
+                if hit.region == "mid":
+                    hit.region = "mid_cluster"
+                hit.trusted = True
+                continue
             if hit.weak and not _strong_in_same_band(hits, group, hit):
                 continue
             # Multi-word e-signature phrases are trusted even alone mid-page.

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from Util.keys import KeyHit
 from Util.model import predict
+from Util.geometry import KEYLESS_BAND_FRAC, boxes_overlap
 from Util.window import expand_for_key, words_in_box
 
 LABELS = ["person"]
@@ -21,7 +22,6 @@ _MAX_WORDS = 4
 # Keyless name: near a DOB or Member ID key only (either one is enough).
 KEYLESS_TOP_FRAC = 0.20
 KEYLESS_BOTTOM_FRAC = 0.10
-KEYLESS_BAND_FRAC = 0.03
 ANCHOR_FIELDS = frozenset({"dob", "member_id"})
 
 _TITLES = frozenset(
@@ -314,7 +314,7 @@ def _anchor_zone(cy: float, page_h: float) -> str | None:
 
 
 def keyless_band(anchor: KeyHit, page_w: float, page_h: float) -> tuple[float, float, float, float]:
-    """±3% page height around the key, full page width horizontally."""
+    """±KEYLESS_BAND_FRAC page height around the key, full page width horizontally."""
     pad_y = KEYLESS_BAND_FRAC * page_h if page_h else 8.0
     left = 0.0
     right = page_w if page_w else anchor.box.right + 200.0
@@ -344,6 +344,7 @@ def extract_keyless(anchor: KeyHit, words, page_w: float, page_h: float) -> Name
         raws,
     )
     label = f"near:{anchor.key}"
+    pct = f"±{KEYLESS_BAND_FRAC * 100:g}%"
     best_text = ""
     best_score = -1.0
     for raw in raws:
@@ -360,7 +361,7 @@ def extract_keyless(anchor: KeyHit, words, page_w: float, page_h: float) -> Name
             key=label,
             region=zone,
             sentence=sentence,
-            scale="±3%",
+            scale=pct,
             ner_text=best_text,
             value=value,
             score=best_score,
@@ -372,14 +373,14 @@ def extract_keyless(anchor: KeyHit, words, page_w: float, page_h: float) -> Name
             key=label,
             region=zone,
             sentence=sentence,
-            scale="±3%",
+            scale=pct,
             ner_text=value,
             value=value,
             score=score,
             accepted=True,
             source=f"keyless_{source or 'geometry'}",
         )
-    return NameHit(key=label, region=zone, sentence=sentence, scale="±3%", source="keyless")
+    return NameHit(key=label, region=zone, sentence=sentence, scale=pct, source="keyless")
 
 
 def merge_page_names(keyed: list[NameHit], keyless: list[NameHit]) -> list[NameHit]:
@@ -398,19 +399,22 @@ def merge_page_names(keyed: list[NameHit], keyless: list[NameHit]) -> list[NameH
 
 
 def extract_page(hits: list[KeyHit], words, page_w: float, page_h: float) -> list[NameHit]:
-    """Keyed pass first. Keyless only when this page has no name key."""
+    """Keyed pass, then keyless on every page except over keyed name boxes."""
     name_keys = [hit for hit in hits if hit.trusted and hit.field == "name" and hit.value_text]
-    if name_keys:
-        rows = [extract_box(hit) for hit in name_keys]
-        mark_selected(rows)
-        return rows
+    keyed = [extract_box(hit) for hit in name_keys]
+    keyed_boxes = [hit.value_box for hit in name_keys if hit.value_box is not None]
 
     keyless: list[NameHit] = []
     for hit in hits:
         if not (hit.trusted and hit.field in ANCHOR_FIELDS):
             continue
+        band = keyless_band(hit, page_w, page_h)
+        if any(boxes_overlap(band, box) for box in keyed_boxes):
+            continue
         row = extract_keyless(hit, words, page_w, page_h)
         if row is not None:
             keyless.append(row)
-    mark_selected(keyless)
-    return keyless
+
+    rows = merge_page_names(keyed, keyless)
+    mark_selected(rows)
+    return rows
