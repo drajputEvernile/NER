@@ -429,8 +429,7 @@ function emptyRow(group: string): RowState {
 }
 
 function KeysValuesTab({ recordId, page }: { recordId: string; page: MasterPage }) {
-  const [groups, setGroups] = useState<string[]>([]);
-  const [group, setGroup] = useState("Member DOB");
+  const [groups, setGroups] = useState<string[]>(["Member DOB"]);
   const [rows, setRows] = useState<RowState[]>([emptyRow("Member DOB")]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -438,10 +437,7 @@ function KeysValuesTab({ recordId, page }: { recordId: string; page: MasterPage 
 
   useEffect(() => {
     void listMasterKeyGroups().then((list) => {
-      if (list.length) {
-        setGroups(list);
-        setGroup((current) => (list.includes(current) ? current : list[0]));
-      }
+      if (list.length) setGroups(list);
     });
   }, []);
 
@@ -455,10 +451,9 @@ function KeysValuesTab({ recordId, page }: { recordId: string; page: MasterPage 
         const anns = data.annotations || [];
         if (anns.length) {
           setRows(anns);
-          setGroup(anns[0].group || "Member DOB");
           setSaved(true);
         } else {
-          setRows([emptyRow(group)]);
+          setRows([emptyRow("Member DOB")]);
         }
       })
       .catch((exc) => {
@@ -467,21 +462,11 @@ function KeysValuesTab({ recordId, page }: { recordId: string; page: MasterPage 
     return () => {
       cancelled = true;
     };
-    // intentionally re-load when page changes; group default applied after
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordId, page.file_name, page.page_number]);
-
-  const isEsign = group === "E-Sign";
-
-  function changeGroup(next: string) {
-    setGroup(next);
-    setRows((prev) => prev.map((row) => ({ ...row, group: next })));
-    setSaved(false);
-  }
 
   const canSave = rows.some((row) => {
     if (!row.key.trim()) return false;
-    if (isEsign) return !!(row.value.trim() || row.value2.trim());
+    if (row.group === "E-Sign") return !!(row.value.trim() || row.value2.trim());
     return !!row.value.trim();
   });
 
@@ -491,18 +476,18 @@ function KeysValuesTab({ recordId, page }: { recordId: string; page: MasterPage 
     try {
       const payload = rows
         .map((row) => ({
-          group,
+          group: row.group,
           key: row.key.trim(),
           value: row.value.trim(),
-          value2: isEsign ? row.value2.trim() : "",
+          value2: row.group === "E-Sign" ? row.value2.trim() : "",
         }))
         .filter((row) => {
           if (!row.key) return false;
-          if (isEsign) return !!(row.value || row.value2);
+          if (row.group === "E-Sign") return !!(row.value || row.value2);
           return !!row.value;
         });
       await saveMasterAnnotations(recordId, page.file_name, page.page_number, payload);
-      setRows(payload.length ? payload : [emptyRow(group)]);
+      setRows(payload.length ? payload : [emptyRow(groups[0] || "Member DOB")]);
       setSaved(true);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -513,81 +498,92 @@ function KeysValuesTab({ recordId, page }: { recordId: string; page: MasterPage 
 
   return (
     <div className="mr-tab-content">
-      <div className="mr-text-input" style={{ marginBottom: "0.75rem" }}>
-        <label htmlFor="key-group">Key Group</label>
-        <select
-          id="key-group"
-          value={group}
-          disabled={saving}
-          onChange={(e) => changeGroup(e.target.value)}
-        >
-          {(groups.length ? groups : [group]).map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-      </div>
-
       <div className="mr-missing-list">
-        {rows.map((row, index) => (
-          <div key={index} className="mr-missing-row mr-missed-key-row master-kv-row">
-            <input
-              type="text"
-              placeholder="Key"
-              value={row.key}
-              disabled={saving}
-              onChange={(e) => {
-                const key = e.target.value;
-                setRows((prev) => prev.map((item, i) => (i === index ? { ...item, key } : item)));
-                setSaved(false);
-              }}
-            />
-            <input
-              type="text"
-              placeholder={isEsign ? "Value 1" : "Value"}
-              value={row.value}
-              disabled={saving}
-              onChange={(e) => {
-                const value = e.target.value;
-                setRows((prev) => prev.map((item, i) => (i === index ? { ...item, value } : item)));
-                setSaved(false);
-              }}
-            />
-            {isEsign && (
-              <input
-                type="text"
-                placeholder="Value 2"
-                value={row.value2}
+        {rows.map((row, index) => {
+          const isEsign = row.group === "E-Sign";
+          return (
+            <div key={index} className="mr-missing-row mr-missed-key-row master-kv-row">
+              <select
+                value={row.group}
                 disabled={saving}
+                aria-label={`Key group for row ${index + 1}`}
                 onChange={(e) => {
-                  const value2 = e.target.value;
-                  setRows((prev) => prev.map((item, i) => (i === index ? { ...item, value2 } : item)));
-                  setSaved(false);
-                }}
-              />
-            )}
-            {rows.length > 1 && (
-              <button
-                type="button"
-                className="mr-remove-row"
-                disabled={saving}
-                onClick={() => {
-                  setRows((prev) => prev.filter((_, i) => i !== index));
+                  const group = e.target.value;
+                  setRows((prev) =>
+                    prev.map((item, i) =>
+                      i === index
+                        ? { ...item, group, value2: group === "E-Sign" ? item.value2 : "" }
+                        : item,
+                    ),
+                  );
                   setSaved(false);
                 }}
               >
-                Remove
-              </button>
-            )}
-          </div>
-        ))}
+                {groups.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                placeholder="Key"
+                value={row.key}
+                disabled={saving}
+                onChange={(e) => {
+                  const key = e.target.value;
+                  setRows((prev) => prev.map((item, i) => (i === index ? { ...item, key } : item)));
+                  setSaved(false);
+                }}
+              />
+              <input
+                type="text"
+                placeholder={isEsign ? "Value 1" : "Value"}
+                value={row.value}
+                disabled={saving}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setRows((prev) => prev.map((item, i) => (i === index ? { ...item, value } : item)));
+                  setSaved(false);
+                }}
+              />
+              {isEsign && (
+                <input
+                  type="text"
+                  placeholder="Value 2"
+                  value={row.value2}
+                  disabled={saving}
+                  onChange={(e) => {
+                    const value2 = e.target.value;
+                    setRows((prev) =>
+                      prev.map((item, i) => (i === index ? { ...item, value2 } : item)),
+                    );
+                    setSaved(false);
+                  }}
+                />
+              )}
+              {rows.length > 1 && (
+                <button
+                  type="button"
+                  className="mr-remove-row"
+                  disabled={saving}
+                  onClick={() => {
+                    setRows((prev) => prev.filter((_, i) => i !== index));
+                    setSaved(false);
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          );
+        })}
         <button
           type="button"
           className="btn secondary mr-add-btn"
           disabled={saving}
           onClick={() => {
-            setRows((prev) => [...prev, emptyRow(group)]);
+            setRows((prev) => [...prev, emptyRow(groups[0] || "Member DOB")]);
             setSaved(false);
           }}
         >
