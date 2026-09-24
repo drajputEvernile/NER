@@ -17,8 +17,6 @@ const IMAGE_ZOOM_MIN = 1;
 const IMAGE_ZOOM_MAX = 4;
 const IMAGE_ZOOM_STEP = 0.25;
 
-type TabKey = "ocr_data" | "keys_values";
-
 type Props = {
   onBack: () => void;
 };
@@ -34,7 +32,6 @@ export default function MasterDataBuilder({ onBack }: Props) {
   const [imageZoom, setImageZoom] = useState(1);
   const [fittedImageSize, setFittedImageSize] = useState<{ w: number; h: number } | null>(null);
   const [imageNaturalSize, setImageNaturalSize] = useState<{ w: number; h: number } | null>(null);
-  const [activeTab, setActiveTab] = useState<TabKey>("ocr_data");
 
   const viewerScrollRef = useRef<HTMLDivElement | null>(null);
   const activeThumbRef = useRef<HTMLButtonElement | null>(null);
@@ -82,7 +79,6 @@ export default function MasterDataBuilder({ onBack }: Props) {
     setImageZoom(1);
     setFittedImageSize(null);
     setImageNaturalSize(null);
-    setActiveTab("ocr_data");
   }
 
   function selectPage(next: MasterPage) {
@@ -90,7 +86,6 @@ export default function MasterDataBuilder({ onBack }: Props) {
     setImageZoom(1);
     setFittedImageSize(null);
     setImageNaturalSize(null);
-    setActiveTab("ocr_data");
   }
 
   const pageIndex = useMemo(() => {
@@ -264,7 +259,7 @@ export default function MasterDataBuilder({ onBack }: Props) {
                 </div>
               </div>
 
-              <div className="review-split">
+              <div className="review-split master-triple-split">
                 <div className="pages-col">
                   <div className="viewer">
                     {page && !fittedImageSize && (
@@ -352,46 +347,38 @@ export default function MasterDataBuilder({ onBack }: Props) {
                   </div>
                 </div>
 
-                <div className="table-wrap mr-panel">
+                <div className="table-wrap mr-panel master-side-panel">
                   <div className="table-toolbar">
                     <div className="table-toolbar-start">
-                      <h3 className="output-panel-title">Master Data</h3>
-                      <div className="output-tabs" role="tablist">
-                        <button
-                          type="button"
-                          role="tab"
-                          className={`output-tab ${activeTab === "ocr_data" ? "active" : ""}`}
-                          onClick={() => setActiveTab("ocr_data")}
-                        >
-                          OCR Data
-                        </button>
-                        <button
-                          type="button"
-                          role="tab"
-                          className={`output-tab ${activeTab === "keys_values" ? "active" : ""}`}
-                          onClick={() => setActiveTab("keys_values")}
-                        >
-                          Keys & Values
-                        </button>
-                      </div>
+                      <h3 className="output-panel-title">OCR Data</h3>
                     </div>
                   </div>
                   <div className="mr-box-header">
-                    <h4>
-                      {activeTab === "ocr_data" ? "OCR Data" : "Keys & Values"}
-                      {page ? ` — Page ${page.page_number}` : ""}
-                    </h4>
-                    <p>
-                      {activeTab === "ocr_data"
-                        ? "OCR text for this page."
-                        : "Annotate key/value pairs by key group for master training data."}
-                    </p>
+                    <h4>OCR Data{page ? ` — Page ${page.page_number}` : ""}</h4>
+                    <p>OCR text for this page.</p>
                   </div>
                   <div className="table-panel mr-body">
                     {!page ? (
                       <div className="empty">Select a page</div>
-                    ) : activeTab === "ocr_data" ? (
+                    ) : (
                       <MasterOcrTab recordId={doc.record_id} page={page} />
+                    )}
+                  </div>
+                </div>
+
+                <div className="table-wrap mr-panel master-side-panel">
+                  <div className="table-toolbar">
+                    <div className="table-toolbar-start">
+                      <h3 className="output-panel-title">Keys & Values</h3>
+                    </div>
+                  </div>
+                  <div className="mr-box-header">
+                    <h4>Keys & Values{page ? ` — Page ${page.page_number}` : ""}</h4>
+                    <p>Annotate key/value pairs by key group for master training data.</p>
+                  </div>
+                  <div className="table-panel mr-body">
+                    {!page ? (
+                      <div className="empty">Select a page</div>
                     ) : (
                       <KeysValuesTab recordId={doc.record_id} page={page} />
                     )}

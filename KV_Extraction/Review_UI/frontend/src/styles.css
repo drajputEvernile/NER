@@ -1027,6 +1027,29 @@ button {
   gap: 0.85rem;
 }
 
+.master-triple-split {
+  grid-template-columns: minmax(0, 1.1fr) minmax(240px, 0.85fr) minmax(280px, 1fr);
+  gap: 0;
+}
+
+.master-triple-split > .pages-col {
+  border-right: 1px solid var(--border);
+}
+
+.master-side-panel {
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+
+.master-side-panel:last-child {
+  border-right: none;
+}
+
+.master-side-panel .mr-body {
+  overflow: auto;
+}
+
 .pages-col {
   min-width: 0;
   min-height: 0;
