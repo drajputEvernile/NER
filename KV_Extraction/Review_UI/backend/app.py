@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from Util import config
 from Util.geometry import group_lines, words_from_page
+from Master_Data_Builder.api import router as master_router
 
 app = FastAPI(title="KV Extraction Review")
 app.add_middleware(
@@ -31,6 +32,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(master_router)
 
 FIELD_PREFIXES = ("dob", "ID", "MName", "PName", "ESig")
 OVERLAY_FIELDS = {
@@ -235,8 +237,20 @@ def _split_keyed(item: str) -> tuple[str, str]:
     return item, ""
 
 
-def _hit_id(record_id: str, page_number: str, file_name: str, prefix: str, key: str) -> str:
-    return f"{record_id}|{page_number}|{file_name}|{prefix}|{key}"
+def _hit_id(
+    record_id: str,
+    page_number: str,
+    file_name: str,
+    prefix: str,
+    index: int,
+    key: str,
+    region: str = "",
+    value: str = "",
+) -> str:
+    """Unique per occurrence — same key text on one page must not share a review id."""
+    return (
+        f"{record_id}|{page_number}|{file_name}|{prefix}|{index}|{key}|{region}|{value}"
+    )
 
 
 def _load_extraction(run_dir: Path) -> pd.DataFrame:
@@ -278,8 +292,12 @@ def _page_hits(row: pd.Series, reviews: dict[str, dict[str, str]]) -> list[dict[
             _, sel_flag = _split_keyed(selected[index]) if index < len(selected) else (key, "")
             _, source = _split_keyed(sources[index]) if index < len(sources) else (key, "")
             _, sig_date = _split_keyed(dates[index]) if index < len(dates) else (key, "")
-            hid = _hit_id(record_id, page_number, file_name, prefix, key)
+            hid = _hit_id(record_id, page_number, file_name, prefix, index, key, region, value)
             review = reviews.get(hid) or {}
+            # Migrate legacy ids that only used key text (collided on duplicates).
+            if not review:
+                legacy = f"{record_id}|{page_number}|{file_name}|{prefix}|{key}"
+                review = reviews.get(legacy) or {}
             hits.append(
                 {
                     "id": hid,
@@ -352,7 +370,9 @@ def _iter_extraction_hits(frame: pd.DataFrame) -> list[dict[str, Any]]:
                     "Selected": sel_flag,
                     "Source": source,
                     "field": prefix,
-                    "hit_id": _hit_id(record_id, page_number, file_name, prefix, key),
+                    "hit_id": _hit_id(
+                        record_id, page_number, file_name, prefix, index, key, region, value
+                    ),
                 }
                 if prefix == "ESig":
                     base["ProviderName"] = value

@@ -16,3 +16,13 @@ npm run dev
 ```
 
 Then open http://127.0.0.1:5174
+
+## Master Data: select records (optional CLI)
+
+Eligible = folders under `Raw_Input` with ≤ `Master_Data_Max_Pages` (config). Writes `Data/Master_Data/selected_records.json`.
+
+```powershell
+.\.venv\Scripts\python.exe -m Master_Data_Builder.select_records -N 20
+```
+
+(Or use **Select records** inside the Master Data Builder UI.)

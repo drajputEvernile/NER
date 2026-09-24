@@ -140,3 +140,96 @@ export async function setMissedKeys(
   }
   return response.json();
 }
+
+// ---- Master Data Builder ----------------------------------------------------
+
+export type MasterPage = {
+  page_number: string;
+  file_name: string;
+};
+
+export type MasterDocument = {
+  record_id: string;
+  page_count: string;
+  pages: MasterPage[];
+};
+
+export type MasterAnnotation = {
+  group: string;
+  key: string;
+  value: string;
+  value2: string;
+};
+
+export function listMasterKeyGroups() {
+  return getJson<string[]>("/api/master/key-groups");
+}
+
+export function getMasterRecords() {
+  return getJson<{
+    documents: MasterDocument[];
+    n_selected: number;
+    selected_path?: string;
+    master_json?: string;
+    master_excel?: string;
+  }>("/api/master/records");
+}
+
+export async function selectMasterRecords(n: number) {
+  const response = await fetch("/api/master/select", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ n }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export function masterImageUrl(recordId: string, fileName: string) {
+  const params = new URLSearchParams({ record_id: recordId, file_name: fileName });
+  return `/api/master/image?${params.toString()}`;
+}
+
+export async function getMasterOcrText(recordId: string, fileName: string) {
+  const params = new URLSearchParams({ record_id: recordId, file_name: fileName });
+  const response = await fetch(`/api/master/ocr-text?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.text();
+}
+
+export function getMasterAnnotations(recordId: string, fileName: string, pageNumber: string) {
+  const params = new URLSearchParams({
+    record_id: recordId,
+    file_name: fileName,
+    page_number: pageNumber,
+  });
+  return getJson<{ annotations: MasterAnnotation[] }>(`/api/master/annotations?${params.toString()}`);
+}
+
+export async function saveMasterAnnotations(
+  recordId: string,
+  fileName: string,
+  pageNumber: string,
+  annotations: MasterAnnotation[],
+) {
+  const response = await fetch("/api/master/annotations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      record_id: recordId,
+      file_name: fileName,
+      page_number: pageNumber,
+      annotations,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}

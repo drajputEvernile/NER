@@ -11,6 +11,7 @@ import {
   type RunSummary,
 } from "./api";
 import ManualReviewPanel from "./ManualReviewPanel";
+import MasterDataBuilder from "./MasterDataBuilder";
 
 const IMAGE_ZOOM_MIN = 1;
 const IMAGE_ZOOM_MAX = 4;
@@ -100,6 +101,7 @@ export default function App() {
   const [imageNaturalSize, setImageNaturalSize] = useState<{ w: number; h: number } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<"review" | "master">("review");
 
   const viewerScrollRef = useRef<HTMLDivElement | null>(null);
   const pageImageRef = useRef<HTMLImageElement | null>(null);
@@ -340,6 +342,10 @@ export default function App() {
     setImageNaturalSize(null);
   }
 
+  if (mode === "master") {
+    return <MasterDataBuilder onBack={() => setMode("review")} />;
+  }
+
   return (
     <div className="shell">
       <header className="topbar">
@@ -357,6 +363,9 @@ export default function App() {
           </div>
         </div>
         <div className="top-actions">
+          <button type="button" className="btn primary" onClick={() => setMode("master")}>
+            Master Data Builder
+          </button>
           <button
             type="button"
             className="icon-ghost-btn keep-mobile"

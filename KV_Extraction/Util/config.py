@@ -23,5 +23,11 @@ Local_Output = Path(r"E:\Projects\NER\Data\KV_Output")
 # Set to None to load the latest KV_Run_* under Local_Output.
 Review_Run: Path | None = Path(r"E:\Projects\NER\Data\KV_Output\KV_Run_20260923_131233")
 
+# Master Data Builder output: selected_records.json, master_data.json, master_data.xlsx
+Master_Data_Output = Path(r"E:\Projects\NER\Data\Master_Data")
+
+# Max page count for Master Data record selection (inclusive).
+Master_Data_Max_Pages = 20
+
 # GLiNER model used by every field extractor
 Ner_Model_Path = Path(r"E:\Projects\NER\Models\gliner_medium-v2.1")

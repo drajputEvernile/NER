@@ -1,4 +1,4 @@
-# KV_Extraction local runners
+# KV_Extraction local runners + Review UI API
 pillow>=12.0.0
 gliner>=0.2.21
 sentencepiece>=0.2.0
@@ -6,4 +6,11 @@ protobuf>=4.25.0
 transformers>=4.51.3,<5.14.0
 huggingface_hub>=0.26.0
 pandas>=2.2.0
+openpyxl>=3.1.0
+numpy>=1.26.0
 torch>=2.0.0
+
+# Review_UI backend (FastAPI)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
