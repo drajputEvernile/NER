@@ -63,26 +63,35 @@ def _master_excel_path() -> Path:
 def _load_master_data() -> dict[str, Any]:
     path = _master_json_path()
     if not path.is_file():
-        return {"annotations": []}
+        return {"annotations": [], "measurements": []}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"annotations": []}
+        return {"annotations": [], "measurements": []}
     if not isinstance(data, dict):
-        return {"annotations": []}
+        return {"annotations": [], "measurements": []}
     anns = data.get("annotations")
     if not isinstance(anns, list):
         data["annotations"] = []
+    measures = data.get("measurements")
+    if not isinstance(measures, list):
+        data["measurements"] = []
     return data
 
 
 def _save_master_data(data: dict[str, Any]) -> None:
     path = _master_json_path()
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    _write_master_excel(data.get("annotations") or [])
+    _write_master_excel(
+        data.get("annotations") or [],
+        data.get("measurements") or [],
+    )
 
 
-def _write_master_excel(annotations: list[dict[str, Any]]) -> None:
+def _write_master_excel(
+    annotations: list[dict[str, Any]],
+    measurements: list[dict[str, Any]] | None = None,
+) -> None:
     sheets: dict[str, list[dict[str, str]]] = {name: [] for name in SHEET_NAMES.values()}
     for item in annotations:
         if not isinstance(item, dict):
@@ -101,17 +110,61 @@ def _write_master_excel(annotations: list[dict[str, Any]]) -> None:
             "Value2": str(item.get("value2") or ""),
         }
         sheets[sheet].append(row)
+
+    header_rows: list[dict[str, str]] = []
+    footer_rows: list[dict[str, str]] = []
+    for item in measurements or []:
+        if not isinstance(item, dict):
+            continue
+        record_id = str(item.get("record_id") or "")
+        file_name = str(item.get("file_name") or "")
+        page_number = str(item.get("page_number") or "")
+        if not record_id:
+            continue
+        try:
+            header_val = float(item.get("header_frac") or 0)
+        except (TypeError, ValueError):
+            header_val = 0.0
+        try:
+            footer_val = float(item.get("footer_frac") or 0)
+        except (TypeError, ValueError):
+            footer_val = 0.0
+        if header_val > 0:
+            header_rows.append(
+                {
+                    "RecordId": record_id,
+                    "FileName": file_name,
+                    "PageNumber": page_number,
+                    "HeaderFrac": f"{header_val:.6f}".rstrip("0").rstrip("."),
+                    "HeaderPct": f"{round(header_val * 100, 2)}",
+                }
+            )
+        if footer_val > 0:
+            footer_rows.append(
+                {
+                    "RecordId": record_id,
+                    "FileName": file_name,
+                    "PageNumber": page_number,
+                    "FooterFrac": f"{footer_val:.6f}".rstrip("0").rstrip("."),
+                    "FooterPct": f"{round(footer_val * 100, 2)}",
+                }
+            )
+
     path = _master_excel_path()
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for group, sheet_name in SHEET_NAMES.items():
+        for sheet_name in SHEET_NAMES.values():
             columns = ["RecordId", "FileName", "PageNumber", "KeyGroup", "Key", "Value", "Value2"]
-            if group != "E-Sign":
-                # Still keep Value2 column empty for consistency across sheets? User asked separate sheets;
-                # for non-ESign Value2 can stay for alignment or drop. Keep for training simplicity.
-                pass
             pd.DataFrame(sheets[sheet_name], columns=columns).to_excel(
                 writer, sheet_name=sheet_name, index=False
             )
+        pd.DataFrame(
+            header_rows,
+            columns=["RecordId", "FileName", "PageNumber", "HeaderFrac", "HeaderPct"],
+        ).to_excel(writer, sheet_name="Header Measurements", index=False)
+        pd.DataFrame(
+            footer_rows,
+            columns=["RecordId", "FileName", "PageNumber", "FooterFrac", "FooterPct"],
+        ).to_excel(writer, sheet_name="Footer Measurements", index=False)
 
 
 def _list_page_files(record_id: str) -> list[dict[str, str]]:
@@ -339,6 +392,78 @@ def save_annotations(body: SaveAnnotationsBody) -> dict[str, Any]:
         "ok": True,
         "count": len(cleaned),
         "annotations": cleaned,
+        "master_json": str(_master_json_path()),
+        "master_excel": str(_master_excel_path()),
+    }
+
+
+class MeasurementsBody(BaseModel):
+    record_id: str
+    file_name: str
+    page_number: str
+    header_frac: float = Field(ge=0.0, le=1.0)
+    footer_frac: float = Field(ge=0.0, le=1.0)
+
+
+@router.get("/measurements")
+def get_measurements(record_id: str, file_name: str, page_number: str) -> dict[str, Any]:
+    data = _load_master_data()
+    for item in data.get("measurements") or []:
+        if not isinstance(item, dict):
+            continue
+        if (
+            str(item.get("record_id") or "") == record_id
+            and str(item.get("file_name") or "") == file_name
+            and str(item.get("page_number") or "") == page_number
+        ):
+            return {
+                "record_id": record_id,
+                "file_name": file_name,
+                "page_number": page_number,
+                "header_frac": float(item.get("header_frac") or 0),
+                "footer_frac": float(item.get("footer_frac") or 0),
+            }
+    return {
+        "record_id": record_id,
+        "file_name": file_name,
+        "page_number": page_number,
+        "header_frac": 0.0,
+        "footer_frac": 0.0,
+    }
+
+
+@router.post("/measurements")
+def save_measurements(body: MeasurementsBody) -> dict[str, Any]:
+    header = float(body.header_frac)
+    footer = float(body.footer_frac)
+    if header + footer > 1.0:
+        raise HTTPException(400, "header_frac + footer_frac must be <= 1")
+    data = _load_master_data()
+    existing = [
+        row
+        for row in (data.get("measurements") or [])
+        if isinstance(row, dict)
+        and not (
+            str(row.get("record_id") or "") == body.record_id
+            and str(row.get("file_name") or "") == body.file_name
+            and str(row.get("page_number") or "") == body.page_number
+        )
+    ]
+    row = {
+        "record_id": body.record_id,
+        "file_name": body.file_name,
+        "page_number": body.page_number,
+        "header_frac": round(header, 6),
+        "footer_frac": round(footer, 6),
+    }
+    # Only keep a row if at least one band is set
+    if header > 0 or footer > 0:
+        existing.append(row)
+    data["measurements"] = existing
+    _save_master_data(data)
+    return {
+        "ok": True,
+        "measurement": row,
         "master_json": str(_master_json_path()),
         "master_excel": str(_master_excel_path()),
     }

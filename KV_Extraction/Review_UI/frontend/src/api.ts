@@ -233,3 +233,45 @@ export async function saveMasterAnnotations(
   }
   return response.json();
 }
+
+export type MasterMeasurements = {
+  record_id: string;
+  file_name: string;
+  page_number: string;
+  header_frac: number;
+  footer_frac: number;
+};
+
+export function getMasterMeasurements(recordId: string, fileName: string, pageNumber: string) {
+  const params = new URLSearchParams({
+    record_id: recordId,
+    file_name: fileName,
+    page_number: pageNumber,
+  });
+  return getJson<MasterMeasurements>(`/api/master/measurements?${params.toString()}`);
+}
+
+export async function saveMasterMeasurements(
+  recordId: string,
+  fileName: string,
+  pageNumber: string,
+  headerFrac: number,
+  footerFrac: number,
+) {
+  const response = await fetch("/api/master/measurements", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      record_id: recordId,
+      file_name: fileName,
+      page_number: pageNumber,
+      header_frac: headerFrac,
+      footer_frac: footerFrac,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}

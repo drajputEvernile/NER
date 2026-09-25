@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronLeft, ChevronRight, Minus, Plus, RefreshCw } from "lucide-react";
 import {
   getMasterAnnotations,
+  getMasterMeasurements,
   getMasterOcrText,
   getMasterRecords,
   listMasterKeyGroups,
   masterImageUrl,
   saveMasterAnnotations,
+  saveMasterMeasurements,
   selectMasterRecords,
   type MasterAnnotation,
   type MasterDocument,
@@ -16,10 +18,20 @@ import {
 const IMAGE_ZOOM_MIN = 1;
 const IMAGE_ZOOM_MAX = 4;
 const IMAGE_ZOOM_STEP = 0.25;
+const BAND_MAX = 0.95;
 
 type Props = {
   onBack: () => void;
 };
+
+function clampFrac(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), BAND_MAX);
+}
+
+function fmtPct(frac: number) {
+  return `${(frac * 100).toFixed(1)}%`;
+}
 
 export default function MasterDataBuilder({ onBack }: Props) {
   const [documents, setDocuments] = useState<MasterDocument[]>([]);
@@ -32,9 +44,22 @@ export default function MasterDataBuilder({ onBack }: Props) {
   const [imageZoom, setImageZoom] = useState(1);
   const [fittedImageSize, setFittedImageSize] = useState<{ w: number; h: number } | null>(null);
   const [imageNaturalSize, setImageNaturalSize] = useState<{ w: number; h: number } | null>(null);
+  const [headerFrac, setHeaderFrac] = useState(0);
+  const [footerFrac, setFooterFrac] = useState(0);
+  const [bandDirty, setBandDirty] = useState(false);
+  const [bandSaving, setBandSaving] = useState(false);
+  const [bandSaved, setBandSaved] = useState(false);
+  const [bandError, setBandError] = useState<string | null>(null);
 
   const viewerScrollRef = useRef<HTMLDivElement | null>(null);
   const activeThumbRef = useRef<HTMLButtonElement | null>(null);
+  const imageStackRef = useRef<HTMLDivElement | null>(null);
+  const dragKindRef = useRef<"header" | "footer" | null>(null);
+  const fracsRef = useRef({ header: 0, footer: 0 });
+
+  useEffect(() => {
+    fracsRef.current = { header: headerFrac, footer: footerFrac };
+  }, [headerFrac, footerFrac]);
 
   async function refresh() {
     setLoading(true);
@@ -120,6 +145,91 @@ export default function MasterDataBuilder({ onBack }: Props) {
   useEffect(() => {
     activeThumbRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [page?.page_number, page?.file_name]);
+
+  useEffect(() => {
+    if (!doc || !page) {
+      setHeaderFrac(0);
+      setFooterFrac(0);
+      setBandDirty(false);
+      setBandSaved(false);
+      setBandError(null);
+      return;
+    }
+    let cancelled = false;
+    setBandError(null);
+    setBandDirty(false);
+    setBandSaved(false);
+    getMasterMeasurements(doc.record_id, page.file_name, page.page_number)
+      .then((data) => {
+        if (cancelled) return;
+        setHeaderFrac(clampFrac(data.header_frac || 0));
+        setFooterFrac(clampFrac(data.footer_frac || 0));
+        setBandSaved((data.header_frac || 0) > 0 || (data.footer_frac || 0) > 0);
+      })
+      .catch((exc) => {
+        if (!cancelled) setBandError(exc instanceof Error ? exc.message : String(exc));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc?.record_id, page?.file_name, page?.page_number]);
+
+  useEffect(() => {
+    function onMove(event: PointerEvent) {
+      const kind = dragKindRef.current;
+      const stack = imageStackRef.current;
+      if (!kind || !stack) return;
+      const rect = stack.getBoundingClientRect();
+      if (rect.height <= 0) return;
+      const y = (event.clientY - rect.top) / rect.height;
+      if (kind === "header") {
+        const max = Math.max(0, BAND_MAX - fracsRef.current.footer);
+        setHeaderFrac(clampFrac(Math.min(Math.max(y, 0), max)));
+      } else {
+        const fromBottom = 1 - y;
+        const max = Math.max(0, BAND_MAX - fracsRef.current.header);
+        setFooterFrac(clampFrac(Math.min(Math.max(fromBottom, 0), max)));
+      }
+      setBandDirty(true);
+      setBandSaved(false);
+    }
+    function onUp() {
+      dragKindRef.current = null;
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, []);
+
+  function startBandDrag(kind: "header" | "footer") {
+    dragKindRef.current = kind;
+  }
+
+  async function saveBands() {
+    if (!doc || !page) return;
+    setBandSaving(true);
+    setBandError(null);
+    try {
+      await saveMasterMeasurements(
+        doc.record_id,
+        page.file_name,
+        page.page_number,
+        headerFrac,
+        footerFrac,
+      );
+      setBandDirty(false);
+      setBandSaved(true);
+    } catch (exc) {
+      setBandError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBandSaving(false);
+    }
+  }
 
   const currentSrc =
     doc && page ? masterImageUrl(doc.record_id, page.file_name) : "";
@@ -300,6 +410,7 @@ export default function MasterDataBuilder({ onBack }: Props) {
                           className={`viewer-scroll ${imageZoom > 1 ? "zoomed" : ""}`}
                         >
                           <div
+                            ref={imageStackRef}
                             className="page-image-stack"
                             style={
                               fittedImageSize
@@ -316,6 +427,44 @@ export default function MasterDataBuilder({ onBack }: Props) {
                               onLoad={(e) => {
                                 const img = e.currentTarget;
                                 setImageNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
+                              }}
+                            />
+                            <div
+                              className="master-band master-band-header"
+                              style={{ height: `${headerFrac * 100}%` }}
+                              aria-hidden={headerFrac <= 0}
+                            >
+                              {headerFrac > 0.02 && (
+                                <span className="master-band-label">Header {fmtPct(headerFrac)}</span>
+                              )}
+                            </div>
+                            <div
+                              className="master-band-handle master-band-handle-header"
+                              style={{ top: `calc(${headerFrac * 100}% - 7px)` }}
+                              title="Drag down to set header range"
+                              onPointerDown={(e) => {
+                                e.preventDefault();
+                                e.currentTarget.setPointerCapture?.(e.pointerId);
+                                startBandDrag("header");
+                              }}
+                            />
+                            <div
+                              className="master-band master-band-footer"
+                              style={{ height: `${footerFrac * 100}%` }}
+                              aria-hidden={footerFrac <= 0}
+                            >
+                              {footerFrac > 0.02 && (
+                                <span className="master-band-label">Footer {fmtPct(footerFrac)}</span>
+                              )}
+                            </div>
+                            <div
+                              className="master-band-handle master-band-handle-footer"
+                              style={{ bottom: `calc(${footerFrac * 100}% - 7px)` }}
+                              title="Drag up to set footer range"
+                              onPointerDown={(e) => {
+                                e.preventDefault();
+                                e.currentTarget.setPointerCapture?.(e.pointerId);
+                                startBandDrag("footer");
                               }}
                             />
                           </div>
@@ -372,6 +521,41 @@ export default function MasterDataBuilder({ onBack }: Props) {
                       <h3 className="output-panel-title">Keys & Values</h3>
                     </div>
                   </div>
+                  {page && (
+                    <div className="master-band-measures">
+                      <div className="master-band-measures-row">
+                        <div className="master-band-measures-stats">
+                          <span className="master-band-stat-header">
+                            Header <strong>{fmtPct(headerFrac)}</strong>
+                          </span>
+                          <span className="master-band-stat-footer">
+                            Footer <strong>{fmtPct(footerFrac)}</strong>
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="btn primary"
+                          disabled={bandSaving || (!bandDirty && bandSaved)}
+                          onClick={() => void saveBands()}
+                        >
+                          {bandSaving ? "Saving…" : bandSaved && !bandDirty ? "Saved" : "Save bands"}
+                        </button>
+                      </div>
+                      <p className="master-band-measures-hint">
+                        Stretch the blue band from the top and the amber band from the bottom on the
+                        page image to measure header/footer ranges.
+                      </p>
+                      {bandSaved && !bandDirty && (
+                        <div className="mr-reviewed-banner">
+                          <div>
+                            <strong>Bands saved.</strong> Written to{" "}
+                            <code>Header Measurements</code> / <code>Footer Measurements</code>.
+                          </div>
+                        </div>
+                      )}
+                      {bandError && <div className="banner mr-error">{bandError}</div>}
+                    </div>
+                  )}
                   <div className="mr-box-header">
                     <h4>Keys & Values{page ? ` — Page ${page.page_number}` : ""}</h4>
                     <p>Annotate key/value pairs by key group for master training data.</p>
