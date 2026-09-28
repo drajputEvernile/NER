@@ -210,6 +210,35 @@ Other tools:
 `dataset.py`, `train.py`, `evaluate.py` and `crossval.py` use the latest dataset unless
 `--dataset ds_...` is given; `dataset.py` and `ner_export.py` take batch names to limit the input.
 
+### Train on one set of documents, test on another (300 / 200)
+
+```powershell
+# 1. Run and review the training documents (e.g. 300), then build their dataset
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh --model-version v002
+.\.venv\Scripts\python.exe KV_Extraction\Training\dataset.py KV_Run_<300-doc batch>
+
+# 2. Train on every record of it (no held-out split)
+.\.venv\Scripts\python.exe KV_Extraction\Training\train.py --dataset ds_<train> --split all --description "300 docs"
+
+# 3. Run and review a different set of documents (e.g. 200), then build its own dataset
+.\.venv\Scripts\python.exe KV_Extraction\Training\dataset.py KV_Run_<200-doc batch>
+
+# 4. Score v0 and the new version on the 200 only
+.\.venv\Scripts\python.exe KV_Extraction\Training\evaluate.py --dataset ds_<test> --split all --version v003
+```
+
+Build each dataset from its own batch names; `dataset.py` without names pools every batch,
+which would mix the two sets.
+
+### Headings: common list and learned vocabulary
+
+`KV_Extraction\Heading\common_headings.txt` (one heading per line) is never searched for on
+the page. It verifies what the detector found: a heading box rejected only for low confidence
+(score 0.3–0.5) is accepted when its text is in the list. A trained version also learns the
+heading vocabulary from the reviews (how often each text was a true or false heading in other
+documents) and saves it with the version as `vocab_heading_heron.json`, so every reviewed batch
+teaches it more headings. Edit the list freely; it takes effect on the next run.
+
 ## Moving to another system
 
 Copy the code, the models folder (at least `kv_ranker\`) and the inputs (`OCR_Output` and

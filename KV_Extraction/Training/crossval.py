@@ -3,7 +3,8 @@
     python Training/crossval.py [--dataset ds_x] [--min-groups 10]
 
 For every record in the dataset, each field's model is trained (as train.py does, threshold
-included) on the other records only and scored on that record's reviewed pages. The held-out
+and heading vocabulary included) on the other records only and scored on that record's
+reviewed pages. The held-out
 counts are summed over all records, so every page is scored exactly once by a model that did
 not train on its document. v0 (rules) is scored on the same pages for comparison. Nothing is
 saved to the registry; the report is written to the dataset folder as crossval.json.
@@ -55,9 +56,9 @@ def crossval(dataset: str | None, min_groups: int) -> dict[str, Any]:
             rows = train_rows[train_rows["field"] == field]
             if rows.empty:
                 continue
-            info, ranker, level, categories = train_field(rows, field, min_groups)
-            if ranker is not None:
-                models[field] = FieldModel(ranker, float(info["threshold"]), categories, level)
+            _, model = train_field(rows, field, min_groups)
+            if model is not None:
+                models[field] = model
         result = evaluate_frame(test_rows, _version(models))
         fold = {"record": record, "trained": sorted(models)}
         for field, entry in result["fields"].items():

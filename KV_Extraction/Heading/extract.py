@@ -17,6 +17,11 @@ Rules on top of the detector (v0, until a trained classifier replaces them):
              clearly taller than the body text or in capitals, else Subheading
   text label colon labels outside every detector box ('HPI:', 'Family Hx:' mid-line) are added
              as rejected candidates (class text_label); only a trained version selects them
+  common     a detector box rejected only for its low score (FLOOR_SCORE..ACCEPT_SCORE) is
+             accepted when its text is in common_headings.txt. The list is never searched for
+             on the page; it only verifies boxes the detector already found. Text labels are
+             not accepted this way (specialty lists like 'CARDIOLOGY:' match it too); for
+             them, as for every candidate, the match is a feature a trained version learns from.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 
@@ -64,6 +70,51 @@ def heading_fields() -> list[str]:
     return [name for name in DETECTORS if name in config.Heading_Models]
 
 
+COMMON_HEADINGS_FILE = Path(__file__).with_name("common_headings.txt")
+# Shorter keys (HPI, EKG, Plan) must match exactly; longer ones may differ by OCR / spelling slips.
+_FUZZY_MIN_CHARS = 6
+_FUZZY_RATIO = 0.88
+_FILLER = frozenset({"and", "of", "the", "for", "to"})
+
+
+def _common_key(text: str) -> str:
+    """'PROGRESS NOTES:' == 'Progress note'; 'History & Physical' == 'History and Physical'."""
+    words = re.findall(r"[a-z0-9]+", (text or "").casefold())
+    words = [word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word for word in words]
+    return " ".join(word for word in words if word not in _FILLER)
+
+
+@lru_cache(maxsize=1)
+def common_headings() -> frozenset[str]:
+    if not COMMON_HEADINGS_FILE.is_file():
+        return frozenset()
+    lines = COMMON_HEADINGS_FILE.read_text(encoding="utf-8-sig").splitlines()
+    return frozenset(key for key in map(_common_key, lines) if key)
+
+
+@lru_cache(maxsize=4096)
+def common_heading(text: str) -> float:
+    """How closely the whole text matches a common heading: 1.0 exact, the similarity for a
+    near match, 0.0 when it is not in the list."""
+    key = _common_key(text)
+    known = common_headings()
+    if not key:
+        return 0.0
+    if key in known:
+        return 1.0
+    if len(key) < _FUZZY_MIN_CHARS:
+        return 0.0
+    best = max(
+        (
+            SequenceMatcher(None, key, item).ratio()
+            for item in known
+            if len(item) >= _FUZZY_MIN_CHARS and abs(len(item) - len(key)) <= 0.25 * len(key) + 2
+        ),
+        default=0.0,
+    )
+    return round(best, 3) if best >= _FUZZY_RATIO else 0.0
+
+
 @dataclass
 class HeadingRow:
     text: str
@@ -85,6 +136,8 @@ class HeadingRow:
     position: str = ""
     # words after the heading on its line
     tail_words: int = 0
+    # match with common_headings.txt (0 = not in the list)
+    common: float = 0.0
 
     @property
     def selected(self) -> bool:
@@ -221,13 +274,17 @@ def page_headings(
         )
         letter_words = [word for word in ordered if sum(ch.isalpha() for ch in word.content) >= 2]
 
-        note = ""
-        if det.score < ACCEPT_SCORE:
-            note = "low score"
-        elif is_key:
-            note = "KV key"
-        elif kind == "page_header" and len(letter_words) < 2:
-            note = "page header noise"
+        problems = [
+            name for name, bad in (
+                ("KV key", is_key),
+                ("page header noise", kind == "page_header" and len(letter_words) < 2),
+            ) if bad
+        ]
+        common = common_heading(text)
+        note = "low score" if det.score < ACCEPT_SCORE else (problems[0] if problems else "")
+        accepted = not note
+        if note == "low score" and common and not problems:
+            accepted, note = True, "common heading (low score)"
         rows.append(
             HeadingRow(
                 text=text,
@@ -237,8 +294,9 @@ def page_headings(
                 kind=kind,
                 score=det.score,
                 level=_level(kind, height_ratio, text),
-                accepted=not note,
+                accepted=accepted,
                 note=note,
+                common=common,
                 key_field=sorted(key_fields)[0] if key_fields else "",
                 key_overlap=round(len(indexes & any_keys) / len(indexes), 3),
                 value_overlap=round(len(indexes & trusted_values) / len(indexes), 3),
@@ -327,6 +385,7 @@ def text_labels(
                 continue
             height = median_height(span) or body_h
             height_ratio = round(height / body_h, 3)
+            common = common_heading(label)
             rows.append(
                 HeadingRow(
                     text=label,
@@ -338,6 +397,7 @@ def text_labels(
                     level=_level("section", height_ratio, label),
                     accepted=False,
                     note="text label",
+                    common=common,
                     key_overlap=round(sum(item.index in any_keys for item in span) / len(span), 3),
                     value_overlap=round(sum(item.index in trusted_values for item in span) / len(span), 3),
                     height_ratio=height_ratio,

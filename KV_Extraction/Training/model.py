@@ -7,8 +7,17 @@ headings) takes every candidate at or above it. Headings also get a level model 
 Subheading). A field without a model keeps the rules' choice. The rules still generate every
 candidate: the model never invents a value.
 
+Heading vocabulary: a heading model also sees how the candidate's text was reviewed in other
+documents (heading_vocab_*: in how many records it was a true heading, in how many a false
+one). The vocabulary is learnt from the training reviews and saved with the version, so it
+grows with every reviewed batch; heading_common is the match with common_headings.txt.
+A training row's vocabulary counts leave out its own record, so the model learns what the
+vocabulary is worth on documents it has not seen.
+
 Version folder {config.Model_Registry}/vNNN/:
     ranker_{field}.txt, level_{field}.txt   LightGBM boosters
+    vocab_{field}.json                      heading vocabulary {text: [true records, false records]}
+                                            (texts never confirmed as headings only as a hash)
     features.json                           feature columns and per-field category lists
     thresholds.json                         per-field minimum probability to select
     manifest.json, metrics.json             what it was trained on and how it scored
@@ -16,6 +25,7 @@ Version folder {config.Model_Registry}/vNNN/:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from functools import lru_cache
@@ -25,7 +35,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from Heading.extract import DETECTORS
+from Heading.extract import DETECTORS, common_heading
 from Member_ID.id_types import guess_id_type
 from Util import config
 
@@ -40,7 +50,8 @@ NUMERIC = [
     "n_field_accepted", "page_value_count", "page_distinct_values",
     "record_value_pages", "record_value_share", "record_distinct_values",
     "heading_height_ratio", "heading_key_overlap", "heading_value_overlap", "heading_whole_line",
-    "heading_line_count", "heading_ends_colon", "heading_tail_words",
+    "heading_line_count", "heading_ends_colon", "heading_tail_words", "heading_common",
+    "heading_vocab_true", "heading_vocab_false", "heading_vocab_rate",
     # derived within the (page, field) group
     "score_rank", "score_gap", "same_value_in_group",
 ]
@@ -83,6 +94,59 @@ def prepare(frame: pd.DataFrame) -> pd.DataFrame:
     frame.loc[missing, "id_type"] = [
         guess_id_type(str(key) or str(text)) for text, key in zip(frame.loc[missing, "key_text"], frame.loc[missing, "key"])
     ]
+    heading = frame["field"].isin(DETECTORS)
+    frame["heading_common"] = np.nan
+    frame.loc[heading, "heading_common"] = [common_heading(str(text)) for text in frame.loc[heading, "value"]]
+    return frame
+
+
+VOCAB_COLUMNS = ("heading_vocab_true", "heading_vocab_false", "heading_vocab_rate")
+# Record sets while training; counts once saved with a version.
+Vocab = dict[str, tuple[Any, Any]]
+
+
+def heading_vocab(frame: pd.DataFrame) -> Vocab:
+    """Heading text (value_norm) -> (records where it is a true heading, records where it is a false one)."""
+    vocab: dict[str, tuple[set[str], set[str]]] = {}
+    real = frame[frame["value_norm"].astype(str) != ""]
+    for norm, record, label in zip(real["value_norm"].astype(str), real["record_id"].astype(str), real["label"].astype(int)):
+        entry = vocab.setdefault(norm, (set(), set()))
+        entry[0 if label else 1].add(record)
+    return vocab
+
+
+def _hidden(norm: str) -> str:
+    return "sha1:" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def vocab_counts(vocab: Vocab) -> dict[str, list[int]]:
+    """What a version saves: counts only, no record ids. A text never confirmed as a heading
+    can be page content (a name, a date), so it is saved as a hash, and only when it was
+    rejected in at least two records."""
+    out: dict[str, list[int]] = {}
+    for norm, (true, false) in vocab.items():
+        counts = [len(true), len(false)] if isinstance(true, set) else [int(true), int(false)]
+        if counts[0]:
+            out[norm] = counts
+        elif counts[1] >= 2:
+            out[_hidden(norm)] = counts
+    return out
+
+
+def add_vocab(frame: pd.DataFrame, vocab: Vocab) -> pd.DataFrame:
+    """heading_vocab_* for each row; with record sets the row's own record is not counted."""
+    frame = frame.copy()
+    true_counts, false_counts = [], []
+    for norm, record in zip(frame["value_norm"].astype(str), frame["record_id"].astype(str)):
+        true, false = (vocab.get(norm) or vocab.get(_hidden(norm)) or (0, 0)) if norm else (0, 0)
+        if isinstance(true, set):
+            true, false = len(true - {record}), len(false - {record})
+        true_counts.append(int(true))
+        false_counts.append(int(false))
+    t, f = np.array(true_counts, dtype=float), np.array(false_counts, dtype=float)
+    frame["heading_vocab_true"] = t
+    frame["heading_vocab_false"] = f
+    frame["heading_vocab_rate"] = np.where(t + f > 0, (t + 0.5) / (t + f + 1.0), np.nan)
     return frame
 
 
@@ -125,6 +189,7 @@ class FieldModel:
     threshold: float
     categories: dict[str, list[str]]
     level: Any = None
+    vocab: Vocab | None = None
 
 
 class Version:
@@ -145,17 +210,24 @@ class Version:
             if not path.is_file():
                 continue
             level = folder / f"level_{field}.txt"
+            vocab = folder / f"vocab_{field}.json"
             self.fields[field] = FieldModel(
                 booster=lgb.Booster(model_file=str(path)),
                 threshold=float(threshold),
                 categories=features["categories"][field],
                 level=lgb.Booster(model_file=str(level)) if level.is_file() else None,
+                vocab={
+                    norm: tuple(counts)
+                    for norm, counts in json.loads(vocab.read_text(encoding="utf-8")).items()
+                } if vocab.is_file() else None,
             )
 
     def score(self, frame: pd.DataFrame, field: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """(probabilities, selected, levels) for prepared rows of one field. A candidate is
         extracted (accepted) when its probability reaches the threshold."""
         model = self.fields[field]
+        if model.vocab is not None:
+            frame = add_vocab(frame, model.vocab)
         x = matrix(frame, model.categories, self.numeric, self.categorical)
         probs = model.booster.predict(x)
         chosen = select(frame["group_id"], probs, field in MULTI_VALUE, model.threshold)

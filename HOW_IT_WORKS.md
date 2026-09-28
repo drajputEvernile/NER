@@ -134,6 +134,8 @@ The layout model needs `torchvision` next to `torch` / `transformers` (all CPU).
 | Build a training dataset from all reviews | `.\.venv\Scripts\python.exe KV_Extraction\Training\dataset.py` |
 | Train a new version (vNNN) | `.\.venv\Scripts\python.exe KV_Extraction\Training\train.py` |
 | Compare v0 with a version | `.\.venv\Scripts\python.exe KV_Extraction\Training\evaluate.py --version v001 --split test` |
+| Train on every record of a dataset | `.\.venv\Scripts\python.exe KV_Extraction\Training\train.py --dataset ds_train --split all` |
+| Score a version on a separate test batch | `.\.venv\Scripts\python.exe KV_Extraction\Training\evaluate.py --dataset ds_test --split all --version v003` |
 | Held-out accuracy (leave one document out) | `.\.venv\Scripts\python.exe KV_Extraction\Training\crossval.py --dataset ds_x` |
 | Run a batch with a trained version | `... run.py --fresh --model-version v001` |
 
@@ -351,11 +353,15 @@ will replace:
 | Rule | What it does |
 |---|---|
 | score | a box at 0.5 or above is a heading; 0.3–0.5 is shown to the reviewer as a near miss |
+| common heading | a near miss (0.3–0.5, and no other reason to reject it) is accepted when its whole text is in `Heading/common_headings.txt` (`rule_note` = `common heading (low score)`). The list is never searched for on the page; it only verifies boxes the detector found. Matching ignores case, punctuation, plurals and `and / of / the`; keys of 6+ characters may differ by OCR or spelling slips (similarity ≥ 0.88), shorter ones (`HPI`, `Plan`) must match exactly |
 | KV key | a box whose words are all a trusted KV key (`Patient:`, `DOB`, `Chief Complaint`) is not taken; keys are usually not headings, and the exceptions are learnt from reviews |
 | page header | a page-header box needs two words of letters (a clock or a page number is not a running title) |
 | inline label | `Assessment: stable, continue ...` keeps only `Assessment:`; a trailing qualifier is dropped (`Specialty Meds (Initial):` → `Specialty Meds`) |
 | level | titles and page headers are **Heading**; a section header is **Heading** when it is clearly taller than the body text or in capitals, else **Subheading** |
-| text label | a colon label outside every detector box (`HPI:`, `Family Hx:` mid-line; up to four capitalized words ending in `:`, not a trusted KV key) is added as a candidate of class `text_label`. v0 never takes it; the reviewer can tick it and a trained version learns which ones are headings |
+| text label | a colon label outside every detector box (`HPI:`, `Family Hx:` mid-line; up to four capitalized words ending in `:`, not a trusted KV key) is added as a candidate of class `text_label`. v0 never takes it, not even when it is in the common list (on the reviewed pages that would add 4 right headings and 12 wrong ones, mostly specialty lists like `CARDIOLOGY:`); the reviewer can tick it and a trained version learns which ones are headings |
+
+On the reviewed batch the common-heading rule took 13 more right headings and 3 wrong ones
+(`Subjective:`, `Objective:`, `Plan:`, `Assessment:` boxes the detector was unsure of).
 
 Every candidate goes into the same candidate log as the KV fields (section 6), with the
 layout features a classifier needs: detector class and score, height against the body text,
@@ -763,9 +769,20 @@ CPU (LightGBM), in seconds to minutes; no GPU is needed.
    with fewer than 30 reviewed page-fields
    (`--min-groups`), or without both right and wrong candidates, gets no model and keeps the
    rules in that version.
+   **Heading vocabulary**: the heading model also learns from the text. Its features include
+   the match with `common_headings.txt` (`heading_common`) and how the same text was reviewed
+   in *other* documents: in how many records it was a true heading and in how many a false
+   one (`heading_vocab_true / _false / _rate`). A training row never counts its own record,
+   and inside the threshold folds the vocabulary comes from the fit records only, so the
+   model learns what the vocabulary is worth on unseen documents. The vocabulary is saved with
+   the version (`vocab_heading_heron.json`, counts only): confirmed headings as text, texts
+   never confirmed (which can be page content such as names) only as a hash and only when
+   rejected in two or more records. Every reviewed batch grows it.
 3. **Test split**: about 1 record in 5 is a test record, fixed by a hash of its id, so a
    record's pages are never split between training and testing and the split only grows
-   (`{Training_Data}/splits/test_v1.txt`).
+   (`{Training_Data}/splits/test_v1.txt`). When the test set is a separate batch, train with
+   `train.py --split all` (every record of the dataset) and score the version on the test
+   batch's own dataset with `evaluate.py --dataset ds_test --split all --version vNNN`.
 4. **Evaluate** (`Training/evaluate.py`): v0 and the version on the same candidates, per
    field: key-value pair accuracy (as in the UI), precision, recall, false positives on pages
    without the field, and candidate recall (the ceiling any ranker can reach); headings: precision / recall and level
@@ -818,7 +835,11 @@ promotion rule and phases are in `KV_Extraction/Training/PLAN.md`.
   modules, after five conflicting reviews were made consistent with their templates; v002 was
   trained before that fix); with each document held out (`crossval.py`) KV is 96.5% (rules alone 97.1%) and
   headings 62%, because heading choices depend on the template and each template is in one
-  document only. A fair number needs new, reviewed documents.
+  document only. A fair number needs new, reviewed documents. With the common-heading list and
+  the heading vocabulary, the held-out numbers on the same 4 documents are headings 65.3%
+  (rules alone 50.1%) and all modules 86.0% (rules alone 77.1%).
+- The plan: run 300 documents, review them, train on all of them (`--split all`), then run and
+  review a different 200 documents and score the version on those only.
 - Runs are ordered by start time, but never before the run they reran
   (`Training/ner_export.run_started`), not by folder name: folder names are local clock times,
   and this machine's clock has jumped.
@@ -858,6 +879,7 @@ promotion rule and phases are in `KV_Extraction/Training/PLAN.md`.
 | `KV_Extraction/{field}/output.py` | per-field detail CSV columns and the record summary |
 | `KV_Extraction/Util/documents.py` | loads the OCR JSON of every record under `OCR_Input` |
 | `KV_Extraction/Heading/extract.py` | heading candidates from the Heron detector, v0 rules and levels |
+| `KV_Extraction/Heading/common_headings.txt` | common headings, one per line: verifies low-score boxes and is a model feature |
 | `Models/layout_heron/` | the Heron layout detector's weights |
 | `KV_Extraction/Training/features.py` | candidate log and features |
 | `KV_Extraction/Training/normalize.py` | value normalization per field |
