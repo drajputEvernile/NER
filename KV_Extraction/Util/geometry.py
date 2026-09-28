@@ -1,11 +1,21 @@
-"""Page geometry for header, footer, and mid-page key clusters."""
+"""Page geometry for header, footer, and mid-page key clusters.
+
+Header and footer tracks are independent (mes.csv correlation ≈ 0).
+Priors from Data/examp/mes.csv:
+  - Header max 28% (≈ p99); core ~14% (≈ p75)
+  - Footer max 20% (covers p99+); core ~9% (≈ p75)
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-HEADER_FRAC = 0.30
-FOOTER_FRAC = 0.30
+# Extended / max bands — independent tracks (do not set these equal).
+HEADER_FRAC = 0.28
+FOOTER_FRAC = 0.20
+# Core bands (high-confidence zone nearer the edge).
+HEADER_CORE_FRAC = 0.14
+FOOTER_CORE_FRAC = 0.09
 CLUSTER_Y_FRAC = 0.12
 CLUSTER_X_FRAC = 0.40
 # Keyless name band: ±5% page height (also used for Patient-key proximity).
@@ -113,25 +123,68 @@ def median_height(words: list[Word]) -> float:
     return heights[len(heights) // 2]
 
 
-def in_header(box: Box | None, page_h: float) -> bool:
-    return box is not None and page_h > 0 and box.cy / page_h <= HEADER_FRAC
+def header_score(box: Box | None, page_h: float) -> float:
+    """1 at the top edge → 0 at HEADER_FRAC; independent of footer."""
+    if box is None or page_h <= 0 or HEADER_FRAC <= 0:
+        return 0.0
+    frac = box.cy / page_h
+    if frac > HEADER_FRAC:
+        return 0.0
+    return max(0.0, 1.0 - frac / HEADER_FRAC)
 
 
-def in_footer(box: Box | None, page_h: float) -> bool:
-    return box is not None and page_h > 0 and box.cy / page_h >= (1.0 - FOOTER_FRAC)
+def footer_score(box: Box | None, page_h: float) -> float:
+    """1 at the bottom edge → 0 at FOOTER_FRAC from bottom; independent of header."""
+    if box is None or page_h <= 0 or FOOTER_FRAC <= 0:
+        return 0.0
+    from_bottom = 1.0 - box.cy / page_h
+    if from_bottom > FOOTER_FRAC:
+        return 0.0
+    return max(0.0, 1.0 - from_bottom / FOOTER_FRAC)
+
+
+def edge_band(box: Box, page_h: float, text: Box | None) -> str:
+    """'header' / 'footer' when the box is in that band of the image or of the text's extent
+    (text = union of the page's word boxes), else ''. A screenshot of a document viewer ends
+    the page well above the image bottom, so its footer is only a footer of the text. Keys
+    keep the image bands (region_of): on the text's extent, print-stamp keys in the footer
+    ('Report Request ID') become trusted."""
+    fracs = [box.cy / page_h] if page_h > 0 else []
+    if text is not None and text.height() > 0:
+        fracs.append((box.cy - text.top) / text.height())
+    if any(frac <= HEADER_FRAC for frac in fracs):
+        return "header"
+    if any(frac >= 1.0 - FOOTER_FRAC for frac in fracs):
+        return "footer"
+    return ""
 
 
 def region_of(key_box: Box, value_box: Box | None, page_h: float) -> str:
-    """Header and footer win. The key position wins over the value box."""
-    if in_header(key_box, page_h):
-        return "header"
-    if in_footer(key_box, page_h):
+    """Pick header / footer / mid using independent scores; key wins over value."""
+    key_h = header_score(key_box, page_h)
+    key_f = footer_score(key_box, page_h)
+    if key_h > 0 or key_f > 0:
+        if key_h >= key_f:
+            return "header"
         return "footer"
-    if in_header(value_box, page_h):
-        return "header"
-    if in_footer(value_box, page_h):
+    val_h = header_score(value_box, page_h)
+    val_f = footer_score(value_box, page_h)
+    if val_h > 0 or val_f > 0:
+        if val_h >= val_f:
+            return "header"
         return "footer"
     return "mid"
+
+
+def is_edge_region(region: str) -> bool:
+    """True for header/footer bands (including keyless_*). Mid is never an edge."""
+    token = (region or "").casefold()
+    return "header" in token or "footer" in token
+
+
+def region_priority(region: str) -> int:
+    """Keyed selection: try header/footer first (1), then mid (0)."""
+    return 1 if is_edge_region(region) else 0
 
 
 def near(left: Box, right: Box, page_w: float, page_h: float) -> bool:

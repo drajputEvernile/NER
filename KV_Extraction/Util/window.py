@@ -3,17 +3,20 @@
 DOB: short keys 6x, longer keys 5x, key at 40:60, only downward.
 Member ID: same base scale, width 1.4x that box, height 0.7x, key at 20:80.
 Name: short keys 6x, longer keys 5x, key at 15:85, only downward.
-Provider Name / Electronic Signature: same box rules as Name.
+Provider Name / Electronic Signature: same box rules as Name (default downward).
+Provider role/designation keys: upward + full-width ID band (see helpers below).
 """
 
 from __future__ import annotations
 
-from .geometry import Word
+from .geometry import Word, group_lines
 
 SHORT_EXPAND = 6.0
 LONG_EXPAND = 5.0
 LEFT_FRAC = 0.40
 RIGHT_FRAC = 0.60
+# Full-width vertical pad around a designation key when hunting for an ID.
+ROLE_ID_BAND_FRAC = 0.05
 
 
 def expand_for_key(key: str) -> float:
@@ -55,6 +58,47 @@ def expanded_box(
     return box_left, box_top, box_right, box_bottom
 
 
+def upward_box(
+    left: float,
+    top: float,
+    right: float,
+    bottom: float,
+    page_w: float,
+    page_h: float,
+    expand: float,
+    left_frac: float = 0.15,
+    right_frac: float = 0.85,
+    width_factor: float = 1.0,
+    height_factor: float = 1.0,
+) -> tuple[float, float, float, float]:
+    """Same scale as expanded_box but grows upward from the key (value above)."""
+    width = max(right - left, 8.0)
+    height = max(bottom - top, 8.0)
+    center_x = (left + right) / 2.0
+    span = width * expand * width_factor
+    box_left = max(0.0, center_x - span * left_frac)
+    box_right = min(page_w, center_x + span * right_frac) if page_w else center_x + span * right_frac
+    rise = height * expand * height_factor
+    box_top = max(0.0, top - rise) if page_h else max(0.0, top - rise)
+    box_bottom = bottom
+    return box_left, box_top, box_right, box_bottom
+
+
+def full_width_band(
+    top: float,
+    bottom: float,
+    page_w: float,
+    page_h: float,
+    pad_frac: float = ROLE_ID_BAND_FRAC,
+) -> tuple[float, float, float, float]:
+    """Full page width, pad_frac of page height above and below the key band."""
+    pad = pad_frac * page_h if page_h else 8.0
+    box_top = max(0.0, top - pad)
+    box_bottom = min(page_h, bottom + pad) if page_h else bottom + pad
+    right = page_w if page_w else 1.0e9
+    return 0.0, box_top, right, box_bottom
+
+
 def words_in_box(words: list[Word], box: tuple[float, float, float, float]) -> list[Word]:
     """Words whose centers fall inside the box, in reading order."""
     box_left, box_top, box_right, box_bottom = box
@@ -63,8 +107,8 @@ def words_in_box(words: list[Word], box: tuple[float, float, float, float]) -> l
         for word in words
         if box_left <= word.box.cx <= box_right and box_top <= word.box.cy <= box_bottom
     ]
-    chosen.sort(key=lambda word: (word.box.cy, word.box.left))
-    return chosen
+    # By line, then left to right: a value a pixel higher than its key still reads after it.
+    return [word for line in group_lines(chosen) for word in line]
 
 
 def field_box(
@@ -124,7 +168,3 @@ def box_words(
         height_factor,
     )
     return words_in_box(words, box)
-
-
-def sentence_of(key_words: list[Word]) -> str:
-    return " ".join(word.content for word in key_words).strip()

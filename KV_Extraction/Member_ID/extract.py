@@ -1,18 +1,38 @@
-"""Read one member ID from the sentence inside a key's overlay box."""
+"""Read one member ID from the sentence inside a key's overlay box.
+
+Acceptance (all member_id keys):
+  - Value is never a pure alphabetic word.
+  - Allowed shapes (from Data/examp/id.csv):
+      * digits only: 462124, 279
+      * letters + digits: HG758668, EMA20577880, G06330
+      * digits/letters with hyphens: 134-26-2945, 000859374-1473, D24-58988
+      * masked SSN only when last 4 digits exist: XXX-XX-0594 (reject xxx-xx-xxxx)
+  - Reject phones and slash-dates.
+
+Chart is hash-required (Chart# / Chart # only). Similar OCR keys match via fuzzy matcher.
+No keyless member-id extraction — only catalog key hits. An untrusted key counts only when
+it reads an ID a trusted key already read on the page.
+"""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from Util.keys import KeyHit
+from Util.keys import KeyHit, extract_field_keys, linked
+from Util.geometry import Word, is_edge_region, region_priority
 from Util.model import predict
 
 LABELS = ["ID", "identifier"]
-_TOKEN = re.compile(r"^[A-Za-z0-9]+$")
 _PHONE = re.compile(r"^\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}$")
 _SLASH_DATE = re.compile(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$")
 _EDGE = re.compile(r"^[#.,;:|()\[\]]+|[#.,;:|()\[\]]+$")
+# Must contain at least one digit; letters and internal hyphens optional.
+_ID_SHAPE = re.compile(r"^(?=.*\d)[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
+_ALPHA_ONLY = re.compile(r"^[A-Za-z]+$")
+# Masked SSN-style: xxx-xx-1234 / XXX-XX-0594 — keep only when last 4 are digits.
+_MASKED_SSN = re.compile(r"^[Xx]{2,}-[Xx]{2,}-(\d{4})$")
+_MIN_LEN = 3
 
 
 @dataclass
@@ -26,19 +46,41 @@ class IdHit:
     accepted: bool = False
     selected: bool = False
     source: str = "ner"
+    key_hit: KeyHit | None = field(default=None, repr=False, compare=False)
 
 
 def _normalize(text: str) -> str:
     return text.strip().strip("#.,;:|")
 
 
+def is_member_id_value(text: str) -> bool:
+    """True when text matches member-id value patterns (digit-bearing, not alpha-only)."""
+    return bool(accept(text))
+
+
 def accept(text: str) -> str:
+    """Normalize and keep only ID-shaped tokens.
+
+    Masked forms like xxx-xx-xxxx are rejected unless the last 4 digits are
+    present (e.g. XXX-XX-0594 → keep).
+    """
     cleaned = _normalize(text)
     if not cleaned or any(char.isspace() for char in cleaned):
         return ""
-    if not _TOKEN.fullmatch(cleaned) or _PHONE.fullmatch(text.strip()):
+    if _ALPHA_ONLY.fullmatch(cleaned):
         return ""
-    if len(cleaned) < 2:
+    if _PHONE.fullmatch(text.strip()) or _SLASH_DATE.fullmatch(cleaned):
+        return ""
+    masked = _MASKED_SSN.fullmatch(cleaned)
+    if masked:
+        return cleaned  # last-4 digits available
+    # Fully masked / placeholder with no real last-4 (xxx-xx-xxxx).
+    compact = cleaned.casefold().replace("-", "")
+    if compact and set(compact) <= {"x"}:
+        return ""
+    if not _ID_SHAPE.fullmatch(cleaned):
+        return ""
+    if len(cleaned.replace("-", "")) < _MIN_LEN:
         return ""
     return cleaned
 
@@ -82,16 +124,7 @@ def _word_gap(sentence: str, key_at: tuple[int, int], token_at: tuple[int, int])
 
 def _id_token(raw: str) -> str:
     token = _EDGE.sub("", raw.strip())
-    if not token or not any(char.isdigit() for char in token):
-        return ""
-    if _SLASH_DATE.fullmatch(token) or _PHONE.fullmatch(token):
-        return ""
-    if set(token.casefold()) <= {"x", "-"}:
-        return ""
-    kept = accept(token)
-    if len(kept) < 4:
-        return ""
-    return kept
+    return accept(token)
 
 
 def geometry_confidence(word_gap: int) -> float:
@@ -127,10 +160,72 @@ def nearest(sentence: str, key_at: tuple[int, int] | None, raws: list[dict] | No
     return token, score
 
 
-def extract_box(hit: KeyHit) -> IdHit:
-    """One overlay box produces one row. The value is the ID nearest the key."""
+def _in_header_row(hit: KeyHit, hits: list[KeyHit]) -> bool:
+    """Other keys share the key's line and the next word right of it is one of them (or
+    nothing): 'Name  Patient ID  SSN', not the inline 'MRN: 123  DOB: ...'."""
+    height = max(hit.box.height(), 1.0)
+    own = set(hit.word_indexes)
+    row_keys = {
+        index
+        for other in hits
+        if other is not hit and abs(other.box.cy - hit.box.cy) < 0.6 * height
+        for index in other.word_indexes
+        if index not in own
+    }
+    if not row_keys:
+        return False
+    right = [
+        word for word in hit.value_words
+        if word.index not in own and abs(word.box.cy - hit.box.cy) < 0.6 * height and word.box.left >= hit.box.right - 1
+    ]
+    return not right or min(right, key=lambda word: word.box.left).index in row_keys
+
+
+def _column_value(hit: KeyHit, words: list[Word]) -> str:
+    """The ID under a table column header ('Patient ID' over 'E2694028'), else ''. A line read
+    as one OCR word ('(330) 376-7416 EMA24002442') gives the token under the key's centre."""
+    height = max(hit.box.height(), 1.0)
+    below = [
+        word for word in words
+        if 0 <= word.box.top - hit.box.bottom + 0.3 * height < 2.5 * height
+        and min(word.box.right, hit.box.right) - max(word.box.left, hit.box.left) > 0
+    ]
+    if not below:
+        return ""
+    top = min(word.box.top for word in below)
+    found: list[tuple[float, str]] = []
+    for word in below:
+        if word.box.top - top > height:
+            continue
+        text = word.content
+        per_char = word.box.width() / max(len(text), 1)
+        for part in re.finditer(r"\S+", text):
+            token = _id_token(part.group())
+            if token:
+                centre = word.box.left + per_char * (part.start() + part.end()) / 2
+                found.append((abs(centre - hit.box.cx), token))
+    return min(found)[1] if found else ""
+
+
+def extract_box(hit: KeyHit, hits: list[KeyHit] | None = None, words: list[Word] | None = None) -> IdHit:
+    """One overlay box → one row. Accepted only when value matches ID patterns. A key in a
+    table's header row reads its column: the value under it, never the next header."""
+    if hits and _in_header_row(hit, hits):
+        value = _column_value(hit, words or hit.value_words)
+        return IdHit(
+            key=hit.key,
+            region=hit.region,
+            sentence=hit.value_text,
+            ner_text=value,
+            value=value,
+            score=geometry_confidence(0) if value else 0.0,
+            accepted=bool(value),
+            source="column" if value else "ner",
+        )
     raws = predict(hit.value_text, LABELS)
     value, score = nearest(hit.value_text, key_span(hit.value_text, hit.value_words, hit.word_indexes), raws)
+    if value and not is_member_id_value(value):
+        value, score = "", 0.0
     best_text = ""
     best_score = -1.0
     for raw in raws:
@@ -142,7 +237,7 @@ def extract_box(hit: KeyHit) -> IdHit:
         if raw_score > best_score:
             best_text = ner_text
             best_score = raw_score
-    if best_text:
+    if best_text and is_member_id_value(value):
         return IdHit(
             key=hit.key,
             region=hit.region,
@@ -153,7 +248,7 @@ def extract_box(hit: KeyHit) -> IdHit:
             accepted=True,
             source="ner",
         )
-    if value:
+    if value and is_member_id_value(value):
         return IdHit(
             key=hit.key,
             region=hit.region,
@@ -167,14 +262,47 @@ def extract_box(hit: KeyHit) -> IdHit:
     return IdHit(key=hit.key, region=hit.region, sentence=hit.value_text)
 
 
-def keep_unique_keys(rows: list[IdHit]) -> list[IdHit]:
-    """Every distinct key on the page. The same key keeps the higher confidence."""
+def select_per_key(rows: list[IdHit]) -> list[IdHit]:
+    """Keep every key occurrence; select the best one per distinct key (header/footer first,
+    then higher confidence), and only header/footer ones when the page has any."""
     best: dict[str, IdHit] = {}
     for row in rows:
+        if row.accepted and row.value and not is_member_id_value(row.value):
+            row.accepted = False
+            row.value = ""
         current = best.get(row.key.casefold())
-        if current is None or (row.accepted, row.score) > (current.accepted, current.score):
+        if current is None or (
+            row.accepted,
+            region_priority(row.region),
+            row.score,
+        ) > (
+            current.accepted,
+            region_priority(current.region),
+            current.score,
+        ):
             best[row.key.casefold()] = row
-    kept = list(best.values())
-    for row in kept:
-        row.selected = bool(row.accepted and row.value)
-    return kept
+    chosen = [row for row in best.values() if row.accepted and row.value and is_member_id_value(row.value)]
+    chosen_ids = {id(row) for row in chosen}
+    edge_chosen = any(is_edge_region(row.region) for row in chosen)
+    for row in rows:
+        row.selected = id(row) in chosen_ids and (is_edge_region(row.region) or not edge_chosen)
+    return rows
+
+
+def confirmed_repeats(hits: list[KeyHit], rows: list[IdHit], words: list[Word] | None) -> list[IdHit]:
+    """Untrusted keys whose ID is one a trusted key already read on the page: a lone mid-page
+    '(MRN 20766549)' repeats the header's MRN."""
+    known = {_normalize(row.value).casefold() for row in rows if row.accepted and row.value}
+    repeats = []
+    for hit in hits:
+        if hit.trusted or hit.field != "member_id" or not hit.value_text:
+            continue
+        row = extract_box(hit, hits, words)
+        if row.accepted and _normalize(row.value).casefold() in known:
+            repeats.append(linked(row, hit))
+    return repeats
+
+
+def extract_page(hits: list[KeyHit], words: list[Word] | None = None) -> list[IdHit]:
+    rows = extract_field_keys(hits, "member_id", lambda hit: extract_box(hit, hits, words))
+    return select_per_key(rows + confirmed_repeats(hits, rows, words))

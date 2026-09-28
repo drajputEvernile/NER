@@ -1,12 +1,17 @@
-"""Local API for KV extraction manual review.
+"""Local API for the KV extraction Review UI.
 
-Serves KV_Run folders, page images/overlays, and Accuracy saves.
+Batches are the KV_Run_* folders under config.Run_Output. Reviews are stored per run in
+{run}/review/labels.json (see Training/labels.py) and exported to {run}/review/manual_review.xlsx.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +23,15 @@ if str(KV_ROOT) not in sys.path:
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
+from Training import labels, registry
+from Training.ner_export import run_started
+from Training.ocr import page_lines
 from Util import config
-from Util.geometry import group_lines, words_from_page
-from Master_Data_Builder.api import router as master_router
+
+config.make_output_folders()
 
 app = FastAPI(title="KV Extraction Review")
 app.add_middleware(
@@ -32,484 +40,215 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(master_router)
 
-FIELD_PREFIXES = ("dob", "ID", "MName", "PName", "ESig")
-OVERLAY_FIELDS = {
+RUN_PREFIX = "KV_Run_"
+QUEUE_NAME = "kv_run_queue.json"
+# Overlay folder per image tab; older runs used the short extractor prefixes.
+IMAGE_KINDS = {
     "dob": "dob",
+    "member_id": "member_id",
+    "name": "name",
+    "provider_name": "provider_name",
+    "electronic_signature": "electronic_signature",
+    "dos": "dos",
+    "page_no": "page_no",
+    **{name: name for name in labels.HEADING_FIELDS},
     "ID": "member_id",
     "MName": "name",
     "PName": "provider_name",
     "ESig": "electronic_signature",
 }
-# Separate review workbook — one sheet per extractor (not extraction.xlsx).
-REVIEW_EXCEL_NAME = "manual_review.xlsx"
-REVIEW_SHEETS: dict[str, str] = {
-    "dob": "DOB",
-    "ID": "Member_ID",
-    "MName": "Member_Name",
-    "PName": "Provider_Name",
-    "ESig": "E_Signature",
-}
-MISSED_KEYS_SHEET = "Missed_Keys"
-EXTRACTOR_LABELS = {
-    "dob": "DOB",
-    "ID": "Member ID",
-    "MName": "Member Name",
-    "PName": "Provider Name",
-    "ESig": "E Signature",
-}
+
+_rerun_procs: list[subprocess.Popen] = []
+_eval_cache: dict[str, tuple[tuple, dict[str, Any]]] = {}
+_summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+# ---------------------------------------------------------------- runs
 
 
 def _run_dirs() -> list[Path]:
-    """Runs the Review UI can open.
-
-    If config.Review_Run is set to a KV_Run folder, only that folder is used.
-    Otherwise every KV_Run_* under config.Local_Output is listed.
-    """
-    pinned = getattr(config, "Review_Run", None)
-    if pinned is not None:
-        path = Path(pinned)
-        if path.is_dir():
-            return [path]
-        return []
-    root = Path(config.Local_Output)
+    root = Path(config.Run_Output)
     if not root.is_dir():
         return []
     return sorted(
-        (path for path in root.iterdir() if path.is_dir() and path.name.startswith("KV_Run_")),
-        key=lambda path: path.stat().st_mtime,
+        (path for path in root.iterdir() if path.is_dir() and path.name.startswith(RUN_PREFIX)),
+        key=run_started,
         reverse=True,
     )
 
 
 def _resolve_run_dir(run_id: str) -> Path:
-    """Map a run id (folder name) to an absolute path.
-
-    Prefers an exact match under the configured run list so a pinned Review_Run
-    works even if it lives outside Local_Output.
-    """
-    for path in _run_dirs():
-        if path.name == run_id:
-            return path
-    fallback = Path(config.Local_Output) / run_id
-    if fallback.is_dir():
-        return fallback
-    raise HTTPException(404, "run not found")
+    if not run_id.startswith(RUN_PREFIX) or "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise HTTPException(404, "run not found")
+    path = Path(config.Run_Output) / run_id
+    if not path.is_dir():
+        raise HTTPException(404, "run not found")
+    return path
 
 
-def _reviews_path(run_dir: Path) -> Path:
-    return run_dir / "reviews.json"
-
-
-def _review_excel_path(run_dir: Path) -> Path:
-    return run_dir / REVIEW_EXCEL_NAME
-
-
-def _normalize_review(raw: Any) -> dict[str, str] | None:
-    """Accept legacy overall accuracy and the key/value split payload."""
-    if isinstance(raw, str):
-        value = raw.strip().casefold()
-        if value not in {"correct", "incorrect"}:
-            return None
-        return {
-            "key_accuracy": value,
-            "value_accuracy": value,
-            "reason": "",
-            "actual_key": "",
-            "actual_value": "",
-        }
-    if isinstance(raw, dict):
-        key_acc = str(raw.get("key_accuracy") or "").strip().casefold()
-        value_acc = str(raw.get("value_accuracy") or "").strip().casefold()
-        legacy = str(raw.get("accuracy") or "").strip().casefold()
-        if legacy in {"correct", "incorrect"} and not key_acc and not value_acc:
-            key_acc = legacy
-            value_acc = legacy
-        if key_acc not in {"correct", "incorrect"} or value_acc not in {"correct", "incorrect"}:
-            return None
-        if key_acc == "incorrect":
-            value_acc = "incorrect"
-        return {
-            "key_accuracy": key_acc,
-            "value_accuracy": value_acc,
-            "reason": str(raw.get("reason") or "").strip(),
-            "actual_key": str(raw.get("actual_key") or "").strip(),
-            "actual_value": str(raw.get("actual_value") or "").strip(),
-        }
-    return None
-
-
-def _load_reviews(run_dir: Path) -> dict[str, dict[str, str]]:
-    path = _reviews_path(run_dir)
-    if not path.is_file():
-        return {}
+def _read_json(path: Path) -> dict[str, Any] | None:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, dict[str, str]] = {}
-    for hit_id, raw in data.items():
-        normalized = _normalize_review(raw)
-        if normalized:
-            out[str(hit_id)] = normalized
-    return out
+        return None
+    return data if isinstance(data, dict) else None
 
 
-def _save_reviews(run_dir: Path, reviews: dict[str, dict[str, str]]) -> None:
-    _reviews_path(run_dir).write_text(json.dumps(reviews, indent=2) + "\n", encoding="utf-8")
+def _run_meta(run_dir: Path) -> dict[str, Any]:
+    """run.json, else the (active or archived) queue of this run, else {}."""
+    meta = _read_json(run_dir / "run.json")
+    if meta:
+        return meta
+    run_id = run_dir.name[len(RUN_PREFIX):]
+    root = Path(config.Run_Output)
+    for path in [root / QUEUE_NAME, *sorted(root.glob(f"kv_run_queue_{run_id}*.json"))]:
+        data = _read_json(path) if path.is_file() else None
+        if data and data.get("run_id") == run_id:
+            return data
+    return {}
 
 
-def _missed_keys_path(run_dir: Path) -> Path:
-    return run_dir / "missed_keys.json"
-
-
-def _load_missed_keys(run_dir: Path) -> list[dict[str, str]]:
-    path = _missed_keys_path(run_dir)
-    if not path.is_file():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(data, list):
-        return []
-    rows: list[dict[str, str]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        field = str(item.get("field") or "").strip()
-        key = str(item.get("key") or "").strip()
-        value = str(item.get("value") or "").strip()
-        if field not in FIELD_PREFIXES or not key:
-            continue
-        rows.append(
-            {
-                "record_id": str(item.get("record_id") or ""),
-                "file_name": str(item.get("file_name") or ""),
-                "page_number": str(item.get("page_number") or ""),
-                "field": field,
-                "key": key,
-                "value": value,
-            }
-        )
-    return rows
-
-
-def _save_missed_keys(run_dir: Path, rows: list[dict[str, str]]) -> None:
-    _missed_keys_path(run_dir).write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
-
-
-def _page_missed_keys(
-    missed: list[dict[str, str]],
-    record_id: str,
-    page_number: str,
-    file_name: str,
-) -> list[dict[str, str]]:
-    return [
-        {"field": row["field"], "key": row["key"], "value": row.get("value", "")}
-        for row in missed
-        if row["record_id"] == record_id
-        and row["page_number"] == page_number
-        and row["file_name"] == file_name
-    ]
-
-
-def _parse_list_cell(raw: Any) -> list[str]:
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return [str(item) for item in data]
-    except json.JSONDecodeError:
-        pass
-    return [text]
-
-
-def _split_keyed(item: str) -> tuple[str, str]:
-    if ": " in item:
-        key, value = item.split(": ", 1)
-        return key, value
-    return item, ""
-
-
-def _hit_id(
-    record_id: str,
-    page_number: str,
-    file_name: str,
-    prefix: str,
-    index: int,
-    key: str,
-    region: str = "",
-    value: str = "",
-) -> str:
-    """Unique per occurrence — same key text on one page must not share a review id."""
-    return (
-        f"{record_id}|{page_number}|{file_name}|{prefix}|{index}|{key}|{region}|{value}"
-    )
-
-
-def _load_extraction(run_dir: Path) -> pd.DataFrame:
+def _workbook_summary(run_dir: Path) -> dict[str, Any]:
+    """Document / page / time totals from extraction.xlsx, for runs without run.json."""
     path = run_dir / "extraction.xlsx"
     if not path.is_file():
-        raise HTTPException(404, f"extraction.xlsx missing in {run_dir.name}")
-    return pd.read_excel(path, sheet_name="Extraction", dtype=str).fillna("")
-
-
-def _page_hits(row: pd.Series, reviews: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
-    record_id = str(row.get("RecordId") or "")
-    page_number = str(row.get("PageNumber") or "")
-    file_name = str(row.get("FileName") or "")
-    hits: list[dict[str, Any]] = []
-    for prefix in FIELD_PREFIXES:
-        keys = _parse_list_cell(row.get(f"{prefix}_Key"))
-        if not keys:
-            continue
-        regions = _parse_list_cell(row.get(f"{prefix}_Region"))
-        sentences = _parse_list_cell(row.get(f"{prefix}_Sentence"))
-        ner_texts = _parse_list_cell(row.get(f"{prefix}_Ner_Text"))
-        scores = _parse_list_cell(row.get(f"{prefix}_Score"))
-        accepted = _parse_list_cell(row.get(f"{prefix}_Accepted"))
-        selected = _parse_list_cell(row.get(f"{prefix}_Selected"))
-        sources = _parse_list_cell(row.get(f"{prefix}_Source"))
-        if prefix == "ESig":
-            values = _parse_list_cell(row.get(f"{prefix}_ProviderName"))
-            dates = _parse_list_cell(row.get(f"{prefix}_SignatureDate"))
-        else:
-            values = _parse_list_cell(row.get(f"{prefix}_Value"))
-            dates = []
-        for index, key in enumerate(keys):
-            _, region = _split_keyed(regions[index]) if index < len(regions) else (key, "")
-            _, sentence = _split_keyed(sentences[index]) if index < len(sentences) else (key, "")
-            _, ner = _split_keyed(ner_texts[index]) if index < len(ner_texts) else (key, "")
-            _, value = _split_keyed(values[index]) if index < len(values) else (key, "")
-            _, score = _split_keyed(scores[index]) if index < len(scores) else (key, "")
-            _, acc_flag = _split_keyed(accepted[index]) if index < len(accepted) else (key, "")
-            _, sel_flag = _split_keyed(selected[index]) if index < len(selected) else (key, "")
-            _, source = _split_keyed(sources[index]) if index < len(sources) else (key, "")
-            _, sig_date = _split_keyed(dates[index]) if index < len(dates) else (key, "")
-            hid = _hit_id(record_id, page_number, file_name, prefix, index, key, region, value)
-            review = reviews.get(hid) or {}
-            # Migrate legacy ids that only used key text (collided on duplicates).
-            if not review:
-                legacy = f"{record_id}|{page_number}|{file_name}|{prefix}|{key}"
-                review = reviews.get(legacy) or {}
-            hits.append(
-                {
-                    "id": hid,
-                    "field": prefix,
-                    "key": key,
-                    "region": region,
-                    "sentence": sentence,
-                    "ner_text": ner,
-                    "value": value,
-                    "signature_date": sig_date,
-                    "score": score,
-                    "accepted": acc_flag,
-                    "selected": sel_flag,
-                    "source": source,
-                    "accuracy": review.get("key_accuracy", ""),  # legacy alias for UI count
-                    "key_accuracy": review.get("key_accuracy", ""),
-                    "value_accuracy": review.get("value_accuracy", ""),
-                    "reason": review.get("reason", ""),
-                    "actual_key": review.get("actual_key", ""),
-                    "actual_value": review.get("actual_value", ""),
-                }
-            )
-    return hits
-
-
-def _iter_extraction_hits(frame: pd.DataFrame) -> list[dict[str, Any]]:
-    """Flatten extraction.xlsx into one training-friendly row per hit."""
-    rows: list[dict[str, Any]] = []
-    for _, row in frame.iterrows():
-        record_id = str(row.get("RecordId") or "")
-        page_number = str(row.get("PageNumber") or "")
-        file_name = str(row.get("FileName") or "")
-        for prefix in FIELD_PREFIXES:
-            keys = _parse_list_cell(row.get(f"{prefix}_Key"))
-            if not keys:
-                continue
-            regions = _parse_list_cell(row.get(f"{prefix}_Region"))
-            sentences = _parse_list_cell(row.get(f"{prefix}_Sentence"))
-            ner_texts = _parse_list_cell(row.get(f"{prefix}_Ner_Text"))
-            scores = _parse_list_cell(row.get(f"{prefix}_Score"))
-            accepted = _parse_list_cell(row.get(f"{prefix}_Accepted"))
-            selected = _parse_list_cell(row.get(f"{prefix}_Selected"))
-            sources = _parse_list_cell(row.get(f"{prefix}_Source"))
-            if prefix == "ESig":
-                values = _parse_list_cell(row.get(f"{prefix}_ProviderName"))
-                dates = _parse_list_cell(row.get(f"{prefix}_SignatureDate"))
-            else:
-                values = _parse_list_cell(row.get(f"{prefix}_Value"))
-                dates = []
-            for index, key in enumerate(keys):
-                _, region = _split_keyed(regions[index]) if index < len(regions) else (key, "")
-                _, sentence = _split_keyed(sentences[index]) if index < len(sentences) else (key, "")
-                _, ner = _split_keyed(ner_texts[index]) if index < len(ner_texts) else (key, "")
-                _, value = _split_keyed(values[index]) if index < len(values) else (key, "")
-                _, score = _split_keyed(scores[index]) if index < len(scores) else (key, "")
-                _, acc_flag = _split_keyed(accepted[index]) if index < len(accepted) else (key, "")
-                _, sel_flag = _split_keyed(selected[index]) if index < len(selected) else (key, "")
-                _, source = _split_keyed(sources[index]) if index < len(sources) else (key, "")
-                _, sig_date = _split_keyed(dates[index]) if index < len(dates) else (key, "")
-                base = {
-                    "RecordId": record_id,
-                    "FileName": file_name,
-                    "PageNumber": page_number,
-                    "Key": key,
-                    "Region": region,
-                    "Sentence": sentence,
-                    "Ner_Text": ner,
-                    "Score": score,
-                    "Accepted": acc_flag,
-                    "Selected": sel_flag,
-                    "Source": source,
-                    "field": prefix,
-                    "hit_id": _hit_id(
-                        record_id, page_number, file_name, prefix, index, key, region, value
-                    ),
-                }
-                if prefix == "ESig":
-                    base["ProviderName"] = value
-                    base["SignatureDate"] = sig_date
-                else:
-                    base["Value"] = value
-                rows.append(base)
-    return rows
-
-
-def _write_manual_review_excel(
-    run_dir: Path,
-    reviews: dict[str, dict[str, str]],
-    missed_keys: list[dict[str, str]] | None = None,
-) -> None:
-    """Write `{run}/manual_review.xlsx` with one sheet per extractor + Missed_Keys."""
-    frame = _load_extraction(run_dir)
-    hits = _iter_extraction_hits(frame)
-    sheets: dict[str, list[dict[str, str]]] = {name: [] for name in REVIEW_SHEETS.values()}
-    for hit in hits:
-        prefix = str(hit["field"])
-        sheet = REVIEW_SHEETS[prefix]
-        review = reviews.get(str(hit["hit_id"])) or {}
-        key_acc = review.get("key_accuracy", "")
-        value_acc = review.get("value_accuracy", "")
-        any_incorrect = key_acc == "incorrect" or value_acc == "incorrect"
-        reason = review.get("reason", "") if any_incorrect else ""
-        actual_key = review.get("actual_key", "") if key_acc == "incorrect" else ""
-        actual = review.get("actual_value", "") if value_acc == "incorrect" else ""
-        if prefix == "ESig":
-            row = {
-                "RecordId": hit["RecordId"],
-                "FileName": hit["FileName"],
-                "PageNumber": hit["PageNumber"],
-                "Key": hit["Key"],
-                "Region": hit["Region"],
-                "Sentence": hit["Sentence"],
-                "Ner_Text": hit["Ner_Text"],
-                "ProviderName": hit.get("ProviderName", ""),
-                "SignatureDate": hit.get("SignatureDate", ""),
-                "Score": hit["Score"],
-                "Accepted": hit["Accepted"],
-                "Selected": hit["Selected"],
-                "Source": hit["Source"],
-                "KeyAccuracy": key_acc,
-                "ValueAccuracy": value_acc,
-                "ReasonForIncorrect": reason,
-                "ActualCorrectKey": actual_key,
-                "ActualCorrectValue": actual,
-            }
-        else:
-            row = {
-                "RecordId": hit["RecordId"],
-                "FileName": hit["FileName"],
-                "PageNumber": hit["PageNumber"],
-                "Key": hit["Key"],
-                "Region": hit["Region"],
-                "Sentence": hit["Sentence"],
-                "Ner_Text": hit["Ner_Text"],
-                "Value": hit.get("Value", ""),
-                "Score": hit["Score"],
-                "Accepted": hit["Accepted"],
-                "Selected": hit["Selected"],
-                "Source": hit["Source"],
-                "KeyAccuracy": key_acc,
-                "ValueAccuracy": value_acc,
-                "ReasonForIncorrect": reason,
-                "ActualCorrectKey": actual_key,
-                "ActualCorrectValue": actual,
-            }
-        sheets[sheet].append(row)
-
-    if missed_keys is None:
-        missed_keys = _load_missed_keys(run_dir)
-    missed_rows = [
-        {
-            "RecordId": row["record_id"],
-            "FileName": row["file_name"],
-            "PageNumber": row["page_number"],
-            "Extractor": EXTRACTOR_LABELS.get(row["field"], row["field"]),
-            "Field": row["field"],
-            "Key": row["key"],
-            "Value": row.get("value", ""),
+        return {}
+    mtime = path.stat().st_mtime
+    cached = _summary_cache.get(run_dir.name)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        frame = pd.read_excel(path, sheet_name="Extraction Summary", dtype=str).fillna("")
+        pages = pd.to_numeric(frame.get("PageCount"), errors="coerce").fillna(0)
+        seconds = pd.to_numeric(frame.get("TimeSeconds"), errors="coerce").fillna(0)
+        summary = {
+            "records": frame["RecordId"].tolist() if "RecordId" in frame else [],
+            "pages": int(pages.sum()),
+            "time": float(seconds.sum()),
         }
-        for row in missed_keys
-    ]
+    except Exception:  # noqa: BLE001 - unreadable workbook: show the run without totals
+        summary = {}
+    _summary_cache[run_dir.name] = (mtime, summary)
+    return summary
 
-    path = _review_excel_path(run_dir)
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for sheet_name in REVIEW_SHEETS.values():
-            rows = sheets[sheet_name]
-            if sheet_name == "E_Signature":
-                columns = [
-                    "RecordId",
-                    "FileName",
-                    "PageNumber",
-                    "Key",
-                    "Region",
-                    "Sentence",
-                    "Ner_Text",
-                    "ProviderName",
-                    "SignatureDate",
-                    "Score",
-                    "Accepted",
-                    "Selected",
-                    "Source",
-                    "KeyAccuracy",
-                    "ValueAccuracy",
-                    "ReasonForIncorrect",
-                    "ActualCorrectKey",
-                    "ActualCorrectValue",
-                ]
-            else:
-                columns = [
-                    "RecordId",
-                    "FileName",
-                    "PageNumber",
-                    "Key",
-                    "Region",
-                    "Sentence",
-                    "Ner_Text",
-                    "Value",
-                    "Score",
-                    "Accepted",
-                    "Selected",
-                    "Source",
-                    "KeyAccuracy",
-                    "ValueAccuracy",
-                    "ReasonForIncorrect",
-                    "ActualCorrectKey",
-                    "ActualCorrectValue",
-                ]
-            pd.DataFrame(rows, columns=columns).to_excel(writer, sheet_name=sheet_name, index=False)
-        pd.DataFrame(
-            missed_rows,
-            columns=["RecordId", "FileName", "PageNumber", "Extractor", "Field", "Key", "Value"],
-        ).to_excel(writer, sheet_name=MISSED_KEYS_SHEET, index=False)
+
+def _pid_alive(pid: Any) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel32.CloseHandle(handle)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _start_from_name(run_dir: Path) -> str | None:
+    try:
+        return datetime.strptime(run_dir.name[len(RUN_PREFIX):], "%Y%m%d_%H%M%S").astimezone().isoformat()
+    except ValueError:
+        return None
+
+
+def _page_index(run_dir: Path) -> list[dict[str, str]]:
+    """Distinct (record, page, file) in the run's candidate log."""
+    frame = labels.run_log(run_dir)
+    if frame.empty:
+        return []
+    pages = frame[["record_id", "page_number", "file_name"]].drop_duplicates()
+    return pages.to_dict("records")
+
+
+def _evaluation(run_dir: Path, all_runs: list[Path]) -> dict[str, Any]:
+    """This run's accuracy against the latest reviews of its pages from any run (cached)."""
+    logs = labels.candidate_logs(run_dir)
+    signature = (
+        tuple((path.name, path.stat().st_mtime) for path in logs),
+        tuple(path.name for path in all_runs),
+        labels.labels_signature(all_runs),
+    )
+    cached = _eval_cache.get(run_dir.name)
+    if cached and cached[0] == signature:
+        return cached[1]
+    pooled = labels.pooled_labels(all_runs)
+    result = labels.evaluate_all(run_dir, pooled)
+    _eval_cache[run_dir.name] = (signature, result)
+    return result
+
+
+def _run_info(run_dir: Path, all_runs: list[Path]) -> dict[str, Any]:
+    meta = _run_meta(run_dir)
+    reviewable = bool(labels.candidate_logs(run_dir))
+    summary = {} if meta else _workbook_summary(run_dir)
+
+    status = str(meta.get("status") or ("completed" if (run_dir / "extraction.xlsx").is_file() else "unknown"))
+    if status == "running" and not _pid_alive(meta.get("pid")):
+        status = "stopped"
+
+    documents = meta.get("documents") or []
+    total_docs = int(meta.get("total_docs") or len(documents) or len(summary.get("records", [])))
+    total_pages = int(meta.get("total_pages") or summary.get("pages") or 0)
+    completed_docs = int(meta.get("completed_documents") or (total_docs if summary else 0))
+    completed_pages = int(meta.get("completed_pages") or (total_pages if summary else 0))
+    # Runs without run.json only have per-document extraction time from the workbook.
+    total_time = float(meta.get("total_time_seconds") or summary.get("time") or 0.0)
+
+    page_fields = 0
+    reviewed_pages = 0
+    if reviewable:
+        per_page = labels.reviewed_fields(run_dir, labels.pooled_labels(all_runs))
+        page_fields = sum(per_page.values())
+        reviewed_pages = sum(1 for count in per_page.values() if count >= len(labels.FIELDS))
+    score = _evaluation(run_dir, all_runs) if reviewable else None
+
+    return {
+        "id": run_dir.name,
+        "status": status,
+        "start_time": meta.get("start_time") or _start_from_name(run_dir),
+        "end_time": meta.get("end_time"),
+        "total_time_seconds": round(total_time, 1),
+        "avg_time_per_page": round(total_time / completed_pages, 3) if completed_pages else None,
+        "total_documents": total_docs,
+        "total_pages": total_pages,
+        "completed_documents": completed_docs,
+        "completed_pages": completed_pages,
+        "model_version": meta.get("model_version") or ("v0" if reviewable else "legacy"),
+        "ner_model": meta.get("ner_model_name") or "",
+        "source_run": meta.get("source_run"),
+        "reviewable": reviewable,
+        "reviewed_pages": reviewed_pages,
+        "reviewed_page_fields": page_fields,
+        "accuracy": score["accuracy"] if score else None,
+        "accuracy_correct": score["correct"] if score else 0,
+        "accuracy_wrong": score["wrong"] if score else 0,
+        "accuracy_missed": score["missed"] if score else 0,
+        "accuracy_total": score["total"] if score else 0,
+        "kv_accuracy": score["kv"]["accuracy"] if score else None,
+        "headings": score["headings"] if score else {},
+    }
+
+
+def _active_run(infos: list[dict[str, Any]]) -> str | None:
+    _rerun_procs[:] = [proc for proc in _rerun_procs if proc.poll() is None]
+    for info in infos:
+        if info["status"] == "running":
+            return info["id"]
+    return "starting" if _rerun_procs else None
 
 
 @app.get("/api/health")
@@ -518,245 +257,313 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/runs")
-def list_runs() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for path in _run_dirs():
-        excel = path / "extraction.xlsx"
-        summary_docs = 0
-        summary_pages = 0
-        if excel.is_file():
-            try:
-                summary = pd.read_excel(excel, sheet_name="Extraction Summary", dtype=str).fillna("")
-                summary_docs = len(summary)
-                summary_pages = int(pd.to_numeric(summary.get("PageCount"), errors="coerce").fillna(0).sum())
-            except Exception:  # noqa: BLE001
-                pass
-        rows.append(
-            {
-                "id": path.name,
-                "path": str(path),
-                "has_excel": excel.is_file(),
-                "documents": summary_docs,
-                "pages": summary_pages,
-                "mtime": path.stat().st_mtime,
-            }
-        )
-    return rows
+def list_runs() -> dict[str, Any]:
+    dirs = _run_dirs()
+    infos = [_run_info(path, dirs) for path in dirs]
+    docs = sum(info["total_documents"] for info in infos)
+    pages = sum(info["total_pages"] for info in infos)
+    timed_pages = sum(info["completed_pages"] for info in infos if info["total_time_seconds"])
+    total_time = sum(info["total_time_seconds"] for info in infos)
+    correct = sum(info["accuracy_correct"] for info in infos)
+    judged = sum(info["accuracy_total"] for info in infos)
+    return {
+        "runs": infos,
+        "active_run": _active_run(infos),
+        "totals": {
+            "runs": len(infos),
+            "documents": docs,
+            "pages": pages,
+            "avg_pages_per_document": round(pages / docs, 1) if docs else None,
+            "avg_time_per_page": round(total_time / timed_pages, 3) if timed_pages else None,
+            "accuracy": round(100 * correct / judged, 1) if judged else None,
+            "accuracy_correct": correct,
+            "accuracy_wrong": sum(info["accuracy_wrong"] for info in infos),
+            "accuracy_missed": sum(info["accuracy_missed"] for info in infos),
+            "accuracy_total": judged,
+        },
+    }
+
+
+@app.get("/api/meta")
+def meta() -> dict[str, Any]:
+    return {
+        "fields": [{"id": field, "label": label} for field, label in labels.FIELDS.items()],
+        "reasons": [{"id": code, "label": label} for code, label in labels.REASONS.items()],
+        "heading_reasons": [{"id": code, "label": label} for code, label in labels.HEADING_REASONS.items()],
+        "correction_reasons": sorted(labels.CORRECTION_REASONS),
+        "levels": list(labels.LEVELS),
+        "id_types": [{"id": code, "label": label} for code, label in labels.ID_TYPES.items()],
+    }
 
 
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
     run_dir = _resolve_run_dir(run_id)
-    frame = _load_extraction(run_dir)
-    reviews = _load_reviews(run_dir)
-    missed = _load_missed_keys(run_dir)
-    documents: dict[str, dict[str, Any]] = {}
-    for _, row in frame.iterrows():
-        record_id = str(row.get("RecordId") or "")
-        if not record_id:
-            continue
-        doc = documents.setdefault(
-            record_id,
-            {
-                "record_id": record_id,
-                "page_count": str(row.get("PageCount") or ""),
-                "pages": [],
-            },
-        )
-        page_number = str(row.get("PageNumber") or "")
-        file_name = str(row.get("FileName") or "")
-        page = {
-            "page_number": page_number,
-            "file_name": file_name,
-            "hits": _page_hits(row, reviews),
-            "missed_keys": _page_missed_keys(missed, record_id, page_number, file_name),
-        }
-        doc["pages"].append(page)
+    dirs = _run_dirs()
+    info = _run_info(run_dir, dirs)
+    if not info["reviewable"]:
+        raise HTTPException(409, f"{run_id} has no candidate log; rerun it to review.")
+    per_page = labels.reviewed_fields(run_dir, labels.pooled_labels(dirs))
+    order = [doc.get("record_id") for doc in _run_meta(run_dir).get("documents") or []]
+    documents: dict[str, dict[str, Any]] = {record: None for record in order if record}  # type: ignore[misc]
+    for page in _page_index(run_dir):
+        record = page["record_id"]
+        doc = documents.get(record)
+        if doc is None:
+            doc = documents[record] = {"record_id": record, "pages": []}
+        key = labels.page_key(record, page["page_number"], page["file_name"])
+        doc["pages"].append({**page, "reviewed_fields": per_page.get(key, 0)})
+    out = []
     for doc in documents.values():
-        doc["pages"].sort(key=lambda item: int(item["page_number"] or 0))
+        if not doc:
+            continue
+        doc["pages"].sort(key=lambda item: int(item["page_number"]) if item["page_number"].isdigit() else 0)
+        doc["page_count"] = len(doc["pages"])
+        doc["reviewed_pages"] = sum(1 for p in doc["pages"] if p["reviewed_fields"] >= len(labels.FIELDS))
+        out.append(doc)
+    return {**info, "field_count": len(labels.FIELDS), "documents": out}
+
+
+@app.get("/api/runs/{run_id}/page")
+def get_page(run_id: str, record_id: str, page_number: str, file_name: str) -> dict[str, Any]:
+    run_dir = _resolve_run_dir(run_id)
+    found = labels.page_candidates(run_dir, record_id, page_number, file_name)
+    key = labels.page_key(record_id, page_number, file_name)
+    own = labels.load_labels(run_dir)["pages"].get(key, {}).get("fields", {})
+    others = [path for path in _run_dirs() if path != run_dir]
+    prior = labels.pooled_labels(others) if not all(field in own for field in labels.FIELDS) else {}
+    fields = []
+    for field, label in labels.FIELDS.items():
+        previous = prior.get((key, field))
+        if previous and previous.get("ocr_sha1") and previous["ocr_sha1"] != found[field]["ocr_sha1"]:
+            previous = None
+        if previous and field not in own:
+            previous = labels.auto_review(found[field]["candidates"], previous, field in labels.HEADING_FIELDS)
+        fields.append(
+            {
+                "id": field,
+                "label": label,
+                "kind": "heading" if field in labels.HEADING_FIELDS else "kv",
+                "ocr_sha1": found[field]["ocr_sha1"],
+                "candidates": found[field]["candidates"],
+                "review": own.get(field),
+                "prior": None if field in own else previous,
+            }
+        )
+    info = labels.page_info(run_dir, record_id, page_number, file_name)
     return {
-        "id": run_id,
-        "documents": list(documents.values()),
-        "review_count": sum(
-            1 for value in reviews.values() if value.get("key_accuracy") and value.get("value_accuracy")
-        ),
+        "record_id": record_id,
+        "page_number": page_number,
+        "file_name": file_name,
+        "fields": fields,
+        "page_info": info,
+        "page_info_prior": None if info else labels.pooled_page_info(others, key),
     }
 
 
-def _ocr_page(record_id: str, file_name: str) -> dict[str, Any] | None:
-    folder = Path(config.OCR_Input) / record_id
-    if not folder.is_dir():
-        return None
-    jsons = sorted(path for path in folder.glob("*.json") if path.is_file())
-    if not jsons:
-        return None
-    path = max(jsons, key=lambda item: item.stat().st_size)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    pages = data.get("pages") if isinstance(data, dict) else None
-    if not isinstance(pages, list):
-        return None
-    target = file_name.casefold()
-    for page in pages:
-        if not isinstance(page, dict):
-            continue
-        if str(page.get("fileName") or "").casefold() == target:
-            return page
-    return None
-
-
-def _page_ocr_text(page: dict[str, Any]) -> str:
-    content = str(page.get("content") or "").strip()
-    if content:
-        return content
-    words = words_from_page(page)
-    if not words:
-        return ""
-    return "\n".join(" ".join(word.content for word in line) for line in group_lines(words))
-
-
-@app.get("/api/runs/{run_id}/ocr-text", response_class=PlainTextResponse)
-def get_ocr_text(run_id: str, record_id: str, file_name: str) -> str:
-    run_dir = _resolve_run_dir(run_id)
-    page = _ocr_page(record_id, file_name)
-    if page is None:
-        return "OCR output is not available for this page."
-    text = _page_ocr_text(page)
-    return text or "OCR output is empty for this page."
+@app.get("/api/runs/{run_id}/page-ocr")
+def get_page_ocr(run_id: str, record_id: str, file_name: str) -> dict[str, Any]:
+    _resolve_run_dir(run_id)
+    return page_lines(record_id, file_name)
 
 
 @app.get("/api/runs/{run_id}/image")
 def get_image(run_id: str, record_id: str, file_name: str, kind: str = "overall") -> FileResponse:
     run_dir = _resolve_run_dir(run_id)
-    candidates: list[Path] = []
-    if kind == "raw":
-        candidates.append(Path(config.Raw_Input) / record_id / file_name)
-    elif kind == "overall":
-        overall = run_dir / "overlays" / "overall" / record_id
-        if overall.is_dir():
-            candidates.extend(sorted(overall.glob(f"page_*_{file_name}")))
-        candidates.append(Path(config.Raw_Input) / record_id / file_name)
-    else:
-        field = OVERLAY_FIELDS.get(kind, kind)
-        folder = run_dir / "overlays" / field / record_id
+    paths: list[Path] = []
+    if kind != "raw":
+        folder_name = "overall" if kind == "overall" else IMAGE_KINDS.get(kind)
+        if folder_name is None:
+            raise HTTPException(400, f"unknown image kind: {kind}")
+        folder = run_dir / "overlays" / folder_name / record_id
         if folder.is_dir():
-            candidates.extend(sorted(folder.glob(f"page_*_{file_name}")))
-        candidates.append(Path(config.Raw_Input) / record_id / file_name)
-    for path in candidates:
+            paths.extend(sorted(folder.glob(f"page_*_{file_name}")))
+    paths.append(Path(config.Raw_Input) / record_id / file_name)
+    for path in paths:
         if path.is_file():
             return FileResponse(path)
     raise HTTPException(404, f"image not found for {record_id}/{file_name} kind={kind}")
 
 
-class AccuracyBody(BaseModel):
-    hit_id: str
-    key_accuracy: str  # "", "correct", "incorrect"
-    value_accuracy: str = ""
+class Verdict(BaseModel):
+    verdict: str = ""
     reason: str = ""
-    actual_key: str = ""
-    actual_value: str = ""
+    belongs_to: str = ""
+    prefer_candidate: str = ""
+    level: str = ""
+    id_type: str = ""
+    block_before: str = ""
+    block_after: str = ""
 
 
-@app.post("/api/runs/{run_id}/accuracy")
-def set_accuracy(run_id: str, body: AccuracyBody) -> dict[str, Any]:
-    run_dir = _resolve_run_dir(run_id)
-    key_acc = body.key_accuracy.strip().casefold()
-    value_acc = body.value_accuracy.strip().casefold()
-    if key_acc not in {"", "correct", "incorrect"} or value_acc not in {"", "correct", "incorrect"}:
-        raise HTTPException(400, "key_accuracy and value_accuracy must be '', correct, or incorrect")
-    if bool(key_acc) != bool(value_acc):
-        raise HTTPException(400, "key_accuracy and value_accuracy must both be set or both cleared")
-    if key_acc == "incorrect":
-        value_acc = "incorrect"
-    reason = body.reason.strip()
-    actual_key = body.actual_key.strip()
-    actual_value = body.actual_value.strip()
-    if key_acc == "incorrect" or value_acc == "incorrect":
-        if not reason:
-            raise HTTPException(400, "reason is required when key or value is incorrect")
-        if key_acc == "incorrect" and not actual_key:
-            raise HTTPException(400, "actual_key is required when key is incorrect")
-        if value_acc == "incorrect" and not actual_value:
-            raise HTTPException(400, "actual_value is required when value is incorrect")
-    reviews = _load_reviews(run_dir)
-    if key_acc:
-        reviews[body.hit_id] = {
-            "key_accuracy": key_acc,
-            "value_accuracy": value_acc,
-            "reason": reason if key_acc == "incorrect" or value_acc == "incorrect" else "",
-            "actual_key": actual_key if key_acc == "incorrect" else "",
-            "actual_value": actual_value if value_acc == "incorrect" else "",
-        }
-    else:
-        reviews.pop(body.hit_id, None)
-    _save_reviews(run_dir, reviews)
-    _write_manual_review_excel(run_dir, reviews)
-    return {
-        "ok": True,
-        "hit_id": body.hit_id,
-        "key_accuracy": key_acc,
-        "value_accuracy": value_acc,
-        "reason": reason if key_acc == "incorrect" or value_acc == "incorrect" else "",
-        "actual_key": actual_key if key_acc == "incorrect" else "",
-        "actual_value": actual_value if value_acc == "incorrect" else "",
-        "review_excel": str(_review_excel_path(run_dir)),
-    }
+class AddedValue(BaseModel):
+    value: str
+    value2: str = ""
+    key: str = ""
+    for_candidate: str = ""
+    level: str = ""
+    id_type: str = ""
+    value_words: list[int] = Field(default_factory=list)
+    key_words: list[int] = Field(default_factory=list)
 
 
-class MissedKeyItem(BaseModel):
-    field: str
-    key: str
-    value: str = ""
-
-
-class MissedKeysBody(BaseModel):
+class ReviewBody(BaseModel):
     record_id: str
-    file_name: str
     page_number: str
-    keys: list[MissedKeyItem]
+    file_name: str
+    field: str
+    reviewer: str = ""
+    not_present: bool = False
+    candidates: dict[str, Verdict] = Field(default_factory=dict)
+    added: list[AddedValue] = Field(default_factory=list)
+    notes: str = ""
 
 
-@app.post("/api/runs/{run_id}/missed-keys")
-def set_missed_keys(run_id: str, body: MissedKeysBody) -> dict[str, Any]:
+@app.post("/api/runs/{run_id}/review")
+def save_review(run_id: str, body: ReviewBody) -> dict[str, Any]:
     run_dir = _resolve_run_dir(run_id)
-    cleaned: list[dict[str, str]] = []
-    for item in body.keys:
-        field = item.field.strip()
-        key = item.key.strip()
-        value = item.value.strip()
-        if not key or not value:
+    submission = body.model_dump()
+    try:
+        label = labels.save_field_review(
+            run_dir, body.record_id, body.page_number, body.file_name, body.field, submission, body.reviewer
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    key = labels.page_key(body.record_id, body.page_number, body.file_name)
+    return {"review": label, "reviewed_fields": labels.reviewed_fields(run_dir, labels.pooled_labels(_run_dirs())).get(key, 0)}
+
+
+class PageInfoBody(BaseModel):
+    record_id: str
+    page_number: str
+    file_name: str
+    reviewer: str = ""
+    page_sequence: str = ""
+
+
+@app.post("/api/runs/{run_id}/page-info")
+def save_page_info(run_id: str, body: PageInfoBody) -> dict[str, Any]:
+    """Collected only: nothing detects or scores it."""
+    run_dir = _resolve_run_dir(run_id)
+    try:
+        info = labels.save_page_info(
+            run_dir, body.record_id, body.page_number, body.file_name, body.page_sequence, body.reviewer
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"page_info": info}
+
+
+@app.delete("/api/runs/{run_id}/review")
+def clear_review(run_id: str, record_id: str, page_number: str, file_name: str, field: str) -> dict[str, Any]:
+    run_dir = _resolve_run_dir(run_id)
+    labels.clear_field_review(run_dir, record_id, page_number, file_name, field)
+    key = labels.page_key(record_id, page_number, file_name)
+    return {"reviewed_fields": labels.reviewed_fields(run_dir, labels.pooled_labels(_run_dirs())).get(key, 0)}
+
+
+# ---------------------------------------------------------------- versions and reruns
+
+
+@app.get("/api/versions")
+def versions() -> list[dict[str, Any]]:
+    return registry.list_versions()
+
+
+class RerunBody(BaseModel):
+    model_version: str
+
+
+@app.post("/api/runs/{run_id}/rerun")
+def rerun(run_id: str, body: RerunBody) -> dict[str, Any]:
+    run_dir = _resolve_run_dir(run_id)
+    if not registry.is_runnable(body.model_version):
+        raise HTTPException(400, f"Model version {body.model_version} cannot run yet.")
+    dirs = _run_dirs()
+    active = _active_run([_run_info(path, dirs) for path in dirs])
+    if active:
+        raise HTTPException(409, f"A run is already in progress ({active}).")
+
+    config.make_output_folders()
+    log_path = Path(config.Rerun_Logs) / f"{datetime.now():%Y%m%d_%H%M%S}_{run_id}_{body.model_version}.log"
+    command = [
+        sys.executable,
+        str(KV_ROOT / "run.py"),
+        "--fresh",
+        "--records-from",
+        run_dir.name,
+        "--model-version",
+        body.model_version,
+    ]
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    with log_path.open("w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            command, cwd=str(KV_ROOT.parent), stdout=log, stderr=subprocess.STDOUT, creationflags=flags
+        )
+    _rerun_procs.append(proc)
+    # Fail fast on argument / data errors instead of reporting a run that never appears.
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and proc.poll() is None:
+        time.sleep(0.2)
+    if proc.poll() not in (None, 0):
+        tail = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-8:]
+        raise HTTPException(500, "Rerun failed to start:\n" + "\n".join(tail))
+    return {"started": True, "pid": proc.pid, "log": str(log_path), "source_run": run_dir.name}
+
+
+def _record_set(run_dir: Path) -> frozenset[str]:
+    return frozenset(path.stem for path in labels.candidate_logs(run_dir))
+
+
+@app.get("/api/runs/{run_id}/versions-accuracy")
+def versions_accuracy(run_id: str) -> dict[str, Any]:
+    """Accuracy of every run over this batch's documents, grouped by extraction model version.
+
+    All runs are scored on the same labels: the latest review of each page from any run.
+    """
+    run_dir = _resolve_run_dir(run_id)
+    records = _record_set(run_dir)
+    if not records:
+        raise HTTPException(409, f"{run_id} has no candidate log.")
+    dirs = _run_dirs()
+    known = {version["id"]: version for version in registry.list_versions()}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for path in dirs:
+        if _record_set(path) != records:
             continue
-        if field not in FIELD_PREFIXES:
-            raise HTTPException(400, f"unknown extractor field: {field}")
-        cleaned.append(
+        info = _run_info(path, dirs)
+        score = _evaluation(path, dirs)
+        groups.setdefault(info["model_version"], []).append(
             {
-                "record_id": body.record_id,
-                "file_name": body.file_name,
-                "page_number": body.page_number,
-                "field": field,
-                "key": key,
-                "value": value,
+                "id": path.name,
+                "start_time": info["start_time"],
+                "status": info["status"],
+                "ner_model": info["ner_model"],
+                "accuracy": score["accuracy"],
+                "correct": score["correct"],
+                "wrong": score["wrong"],
+                "missed": score["missed"],
+                "total": score["total"],
+                "fields": score["fields"],
+                "kv": score["kv"],
+                "headings": score["headings"],
             }
         )
-    existing = _load_missed_keys(run_dir)
-    kept = [
-        row
-        for row in existing
-        if not (
-            row["record_id"] == body.record_id
-            and row["file_name"] == body.file_name
-            and row["page_number"] == body.page_number
+    out = []
+    for version, runs in groups.items():
+        out.append(
+            {
+                "model_version": version,
+                "label": known.get(version, {}).get("label", version),
+                "latest": runs[0],
+                "runs": runs,
+            }
         )
-    ]
-    merged = kept + cleaned
-    _save_missed_keys(run_dir, merged)
-    reviews = _load_reviews(run_dir)
-    _write_manual_review_excel(run_dir, reviews, merged)
+    out.sort(key=lambda item: item["model_version"])
     return {
-        "ok": True,
-        "count": len(cleaned),
-        "keys": cleaned,
-        "review_excel": str(_review_excel_path(run_dir)),
+        "run_id": run_id,
+        "documents": len(records),
+        "fields": [{"id": field, "label": label} for field, label in labels.KV_FIELDS.items()],
+        "heading_fields": [{"id": field, "label": label} for field, label in labels.HEADING_FIELDS.items()],
+        "versions": out,
     }

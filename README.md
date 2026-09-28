@@ -1,281 +1,253 @@
-# Member verification
+# NER: key/value extraction from chart pages
 
-OCR chart pages, then rule-based + NER member verification. Run every command from the repo root with the repo `.venv`.
+Local pipeline that reads OCR JSON of chart pages and extracts, in one pass per page:
+Member DOB, Member ID, Member Name, Provider Name, Electronic Signature, DOS, Page No and
+Headings. Results are reviewed in the Review UI, and the reviews train better extraction
+model versions. Everything runs on this machine; no page data leaves it.
+
+How every part works (rules, candidate log, scoring, training): [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
+
+```mermaid
+flowchart LR
+    OCR[OCR JSON<br/>Data\OCR_Output] --> Run[KV_Extraction\run.py]
+    Raw[Page images<br/>Data\Raw] --> Run
+    Models[Models\] --> Run
+    Run --> Batch[Data\Output\Runs\KV_Run_*]
+    Batch --> UI[Review UI]
+    UI --> Labels[review\labels.json]
+    Labels --> Train[Training: dataset / train]
+    Train --> Models
+```
+
+Run every command from the repo root (`E:\Projects\NER`) with the repo `.venv`.
+
+## Setup
+
+The repo runs on **Python 3.13** (`.python-version` = 3.13.15). The `py` launcher may default
+to another version, so create the venv explicitly and always start through
+`.\.venv\Scripts\python.exe`; any KV entry point started on another interpreter stops.
 
 ```powershell
 py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-copy .env.example .env
+
+cd KV_Extraction\Review_UI\frontend
+npm install
+cd ..\..\..
 ```
+
+`.env` (copy of `.env.example`) is only needed by `Azure_OCR`; the extraction pipeline and the
+Review UI don't read it.
+
+## Paths (`KV_Extraction/Util/config.py`)
+
+The config takes four absolute roots. Set them for the machine the pipeline runs on; every
+other path is derived from them.
+
+| Root | Path on this machine | What lives there |
+|---|---|---|
+| `Raw_Input` | `E:\Projects\NER\Data\Raw` | page images: `{RecordId}\{fileName}` (overlays and the UI) |
+| `OCR_Input` | `E:\Projects\NER\Data\OCR_Output` | OCR JSON: `{RecordId}\*.json` (the extraction input) |
+| `Output_Root` | `E:\Projects\NER\Data\Output` | everything the pipeline writes |
+| `Models_Root` | `E:\Projects\NER\Models` | model folders |
+
+The Output folders are created on the first run (or when the Review UI starts):
+
+```
+Data\Output\
+├── Runs\          one KV_Run_{timestamp}\ per batch (with its review\) + the active kv_run_queue.json
+├── Training\      datasets\, splits\, ner\, optional record_sources.csv
+└── Rerun_Logs\    logs of reruns started from the Review UI
+```
+
+### Models
+
+`run.py` checks the model folders before anything runs. A public model that is missing is
+downloaded from Hugging Face at a pinned revision; only model files come down, nothing is sent.
+
+| Folder under `Models_Root` | Model |
+|---|---|
+| `gliner_low` | `urchade/gliner_small-v2.1` (+ `microsoft/deberta-v3-small` tokenizer in `encoder\`) |
+| `layout_heron` | `docling-project/docling-layout-heron` (heading detector) |
+| `kv_ranker\vNNN` | trained extraction versions, built locally from reviews; never downloaded, copy them |
+
+`v0` is the rules and needs nothing under `kv_ranker`. With `HF_HUB_OFFLINE=1` a missing model
+stops the run instead of downloading.
+
+## Run the extraction
+
+`run.py` only reads the OCR JSON under `OCR_Input`; it never calls OCR again.
+
+```powershell
+# New batch over every document
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh
+
+# Resume a stopped batch (skips the documents already done; starts a new batch if the last one completed)
+.\.venv\Scripts\python.exe KV_Extraction\run.py
+```
+
+### Page-count filters
+
+`M` is an exclusive lower limit and `N` an inclusive upper limit. A single value is `N`.
+
+```powershell
+# Documents with 20 pages or fewer
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh -N 20
+
+# Documents with more than 5 and at most 10 pages (6..10)
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh -N 5 10
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh -M 5 -N 10
+
+# Documents with more than 10 pages (no upper limit)
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh -M 10
+
+# Every document (N = 0 means no upper limit; same as no -N)
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh -N 0
+```
+
+### Model versions
+
+`--model-version` picks the extraction model: `v0` is the rules (default), `vNNN` a trained
+version under `Models\kv_ranker`.
+
+```powershell
+# Rules only
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh --model-version v0
+
+# A trained version
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh --model-version v002
+
+# Trained version, only documents with 30 pages or fewer
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh -N 30 --model-version v002
+```
+
+### Rerun an earlier batch
+
+`--records-from` runs exactly the documents of an earlier batch (a folder name under
+`Runs\` or a full path). The new batch is scored with the reviews of the earlier one, so
+versions can be compared on the same pages.
+
+```powershell
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh --records-from KV_Run_20260927_174741 --model-version v0
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh --records-from KV_Run_20260927_174741 --model-version v002
+```
+
+The same rerun can be started from the Review UI home page (Rerun button); its log goes to
+`Data\Output\Rerun_Logs\`.
+
+### What a batch contains
+
+```
+Data\Output\Runs\KV_Run_{timestamp}\
+├── run.json                  run summary (documents, times, model version)
+├── extraction.xlsx           every field, one workbook
+├── detail\{field}\           detail and summary CSVs per field
+├── candidates\{RecordId}.csv candidate log with features (training data)
+├── overlays\                 per-field images, overall\ (all fields) and heading_heron\
+└── review\                   labels.json + manual_review.xlsx, created by the first review
+```
+
+Stopping a run with Ctrl+C keeps the queue; run `run.py` without `--fresh` to carry on.
+`--fresh` abandons an unfinished queue and starts a new batch.
+
+## Review UI
+
+Start the backend and the frontend in two terminals:
+
+```powershell
+# Backend: API on http://127.0.0.1:3000 (reloads on code changes)
+.\.venv\Scripts\python.exe -m uvicorn Review_UI.backend.app:app --app-dir KV_Extraction --host 127.0.0.1 --port 3000 --reload
+```
+
+```powershell
+# Frontend: http://127.0.0.1:3001 (proxies /api to the backend)
+cd KV_Extraction\Review_UI\frontend
+npm run dev
+```
+
+Open [http://127.0.0.1:3001](http://127.0.0.1:3001). The home page lists every batch under
+`Data\Output\Runs` with its accuracy; **Review** opens a batch page by page (reviewer name,
+each field's pairs, headings, and the Correct Page Sequence Number), **Rerun** starts `run.py`
+on the same documents with a chosen model version, and **Detailed view** compares versions on
+the same documents. More in [KV_Extraction/Review_UI/README.md](KV_Extraction/Review_UI/README.md).
+
+Accuracy counts a key/value pair as right only when both the key and the value are correct;
+a wrong pair or a missed pair counts against it. Overall accuracy covers every module,
+headings included.
+
+## Training
+
+Reviews from every batch are pooled (latest review per page and field), then:
+
+```powershell
+# 1. Build a dataset from all reviewed batches -> Data\Output\Training\datasets\ds_{time}\
+.\.venv\Scripts\python.exe KV_Extraction\Training\dataset.py
+
+# 2. Train a new version -> Models\kv_ranker\vNNN\
+.\.venv\Scripts\python.exe KV_Extraction\Training\train.py --description "300 docs"
+
+# 3. Check it: v0 vs the new version on the test split, and held-out accuracy
+.\.venv\Scripts\python.exe KV_Extraction\Training\evaluate.py --version v003 --split test
+.\.venv\Scripts\python.exe KV_Extraction\Training\crossval.py
+
+# 4. Run with it
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh --model-version v003
+```
+
+Other tools:
+
+```powershell
+# Rules accuracy per field on a reviewed batch, listing the wrong / missed pairs of some fields
+.\.venv\Scripts\python.exe KV_Extraction\Training\rules_check.py --run KV_Run_20260927_174741 --show dos page_no
+
+# Selected value per page and field in two batches, side by side
+.\.venv\Scripts\python.exe KV_Extraction\Training\diff_runs.py KV_Run_A KV_Run_B
+
+# GLiNER training data from fully reviewed pages -> Data\Output\Training\ner\
+.\.venv\Scripts\python.exe KV_Extraction\Training\ner_export.py
+```
+
+`dataset.py`, `train.py`, `evaluate.py` and `crossval.py` use the latest dataset unless
+`--dataset ds_...` is given; `dataset.py` and `ner_export.py` take batch names to limit the input.
+
+## Moving to another system
+
+Copy the code, the models folder (at least `kv_ranker\`) and the inputs (`OCR_Output` and
+`Raw`). Set the four roots in `config.py` to where they are on that machine, create the venv,
+install `requirements.txt` and the frontend packages, then run `run.py`: the Output folders
+are created and the public models download on the first run. The reviews live in
+`Output\Runs\*\review\labels.json`; copy the Output folder back to bring them home.
 
 ## Layout
 
 | Folder | Role |
 |---|---|
-| `KV_Extraction/` | Key/value extraction (name, DOB, member ID) from local OCR + raw images |
-| `Azure_OCR/` | Azure Document Intelligence OCR from blob |
-| `V1_MV/` | Previous verification code |
-| `Models/` | GLiNER weights used by `KV_Extraction` |
-| `azure_blob/` | Shared blob helpers |
+| `KV_Extraction\` | extraction pipeline (`run.py`, `pipeline.py`, one folder per field, `Heading\`, `Util\`), `Review_UI\` and `Training\` |
+| `Models\` | GLiNER, Heron and trained `kv_ranker` versions |
+| `Data\` | `Raw\`, `OCR_Output\` and `Output\` (git-ignored) |
+| `Azure_OCR\` | Azure Document Intelligence OCR that produced the OCR JSON (separate from the pipeline) |
+| `azure_blob\` | shared blob helpers |
+| `V1_MV\` | previous member-verification code |
 
-`KV_Extraction` is local-only. Paths are in `KV_Extraction/Util/config.py` (`Raw_Input`, `OCR_Input`, `Local_Output`, `Ner_Model_Path`).
+## Azure OCR (separate step)
 
-## Run KV extraction
-
-```powershell
-.\.venv\Scripts\python.exe KV_Extraction\run_dob_extraction.py
-.\.venv\Scripts\python.exe KV_Extraction\run_id_extraction.py
-.\.venv\Scripts\python.exe KV_Extraction\run_name_extraction.py
-```
-
-Each run writes `{Local_Output}/{Field}_Extraction_{timestamp}/` with the field CSV, summary CSV, and `overlays/`. GLiNER medium is loaded from `Models/gliner_medium-v2.1` by default.
-
-## Download NER models
-
-Weights live next to the catalog in `V1_MV/Models/`, and that is
-the only place the runtime looks for them.
-
-```powershell
-$env:HF_HUB_DISABLE_XET='1'
-.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\__main__.py
-```
-
-Individual models:
-
-```powershell
-.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\gliner_large_v2_1.py
-.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\gliner_medium_v2_1.py
-.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\gliner_low.py
-```
-
-Each model is downloaded, checked for completeness, then **loaded and asked to
-read a test sentence** -- a snapshot can finish with every file present and
-still not load. Anything that fails prints its full traceback and the command
-exits non-zero.
-
-Verify what is already on disk without re-downloading:
-
-```powershell
-.\.venv\Scripts\python.exe V1_MV\Models\model_downloader\__main__.py --check
-```
-
-A verification run also loads every enabled model before it touches the queue,
-so a bad checkpoint stops the run instead of quietly detecting nothing.
-
-### Tokenizer warning on load
-
-transformers 5 warns `incorrect regex pattern ... will lead to incorrect
-tokenization` and suggests `fix_mistral_regex=True` whenever a local config
-carries no `transformers_version`, because it cannot then rule out a Mistral
-tokenizer. The DeBERTa-v3 encoders ship without that field, so it fired on
-every model load even though `model_type` is `deberta-v2` -- and taking the
-advice would install a Mistral pre-tokenizer and corrupt tokenization for
-real. `relink_local_paths` now fills the field in (only when `model_type`
-proves the model is not Mistral, so a genuine Mistral tokenizer still warns),
-which lets transformers skip the check itself. Nothing is suppressed.
-
-## Python version
-
-Any Python from **3.12** upward works; `scipy` and `numpy` set the floor. The
-pipeline is exercised on 3.14, and 3.13 is the better-supported target of the
-two (`torch.jit.script` warns on 3.14+). Nothing here needs a specific minor
-version.
-
-## Run local Docling OCR
-
-```powershell
-.\.venv\Scripts\python.exe Docling_OCR\run.py
-```
-
-Output: `Data/output/{RecordId}/Docling_OCR_Output/{RecordId}.json`
-
-## Run Azure OCR (blob)
+Only needed for new documents that have no OCR JSON yet; needs `.env` and `az login`.
 
 ```powershell
 .\.venv\Scripts\python.exe Azure_OCR\run.py
 ```
 
-Reads images from `AZURE_OCR_RAW_STORAGE_PREFIX`, writes OCR JSON to `AZURE_OCR_STORAGE_WRITE_PREFIX`.
-On start it tallies folders/pages into `Azure_OCR/azure_ocr_progress.json` (queue + progress), then processes **one record / one page at a time** (sequential).
-Pages are saved sorted by `fileName` ascending (`pageNumber` = 1..N).
+Reads images from `AZURE_OCR_RAW_STORAGE_PREFIX` and writes OCR JSON to
+`AZURE_OCR_STORAGE_WRITE_PREFIX`, one record and one page at a time, with its queue in
+`Azure_OCR/azure_ocr_progress.json`.
 
-## Run member verification
+## Previous member verification (`V1_MV`)
 
-Reads OCR from blob (`AZURE_OCR_STORAGE_WRITE_PREFIX`).
-
-```powershell
-.\.venv\Scripts\python.exe V1_MV\run.py
-```
-
-Selected docs only (page count ≤ `MAX_PAGES` in `.env`):
+The earlier rules + NER member verification, kept for reference; the KV pipeline does not use it.
 
 ```powershell
-.\.venv\Scripts\python.exe V1_MV\run_selected.py
-```
-
-Against OCR JSON on disk instead of blob (same pipeline, no storage account
-needed — this is how to exercise the app locally):
-
-```powershell
-.\.venv\Scripts\python.exe V1_MV\run_local.py
-.\.venv\Scripts\python.exe V1_MV\run_local.py --records Test1,Test2
-.\.venv\Scripts\python.exe V1_MV\run_local.py --root Data\output --mode selected
-```
-
-It reads `{root}/{RecordId}/Azure_OCR_Output/{RecordId}.json`, falling back to
-`Docling_OCR_Output/` and then `{root}/{RecordId}.json`.
-
-Like Azure OCR, the run first tallies the records into a queue
-(`V1_MV/mv_progress.json`) and then works through it **one record
-at a time**. Rows are staged in `V1_MV/mv_staging/` as records
-finish, so stopping and rerunning resumes where it left off.
-
-Output is written **batch-wise** at the end of the run: one folder named after
-the end timestamp of the operation, under the single `MV_OUTPUT_PATH` root, with
-one CSV per model covering every record in the batch.
-
-- `{MV_OUTPUT_PATH}/{YYYYMMDD_HHMMSS}/member_verification_{model}.csv`
-- `{MV_OUTPUT_PATH}/{YYYYMMDD_HHMMSS}/ner_{model}.csv`
-
-Default root: `E:\Projects\NER\Data\output`
-
-The batch folder is written **when the queue finishes**. Stop a run part-way
-and there is no folder yet -- the rows for the records that did finish sit in
-`V1_MV/mv_staging/`, and the log says so on exit. Rerun to carry
-on and the batch is written then.
-
-Any failure stops the run and logs the full traceback: a model that will not
-load, a blob read that keeps failing, a bad record. Nothing is swallowed and
-turned into "detected nothing".
-
-There are **no per-record folders**: each CSV holds every record in the batch,
-one row per page. Both files lead with `RecordId` (the NER CSV also carries
-`Page_No`) so rows stay traceable now that records share a file. Each run
-writes its own timestamped folder, so earlier batches are never overwritten.
-
-One pair of CSVs is written per enabled model, so with all three NER toggles on
-a batch folder holds six files:
-
-```
-20260909_221419/
-  member_verification_gliner_large.csv    ner_gliner_large.csv
-  member_verification_gliner_medium.csv   ner_gliner_medium.csv
-  member_verification_gliner_low.csv      ner_gliner_low.csv
-```
-
-## Build the member CSVs
-
-`V1_MV/build_member_csvs.py` is standalone: it re-shapes the
-system data and a finished batch into three tables. It never re-runs
-verification.
-
-| Source | What it is |
-|---|---|
-| `member_list_source` | the system data (`system_input.csv`) |
-| `member_verification_source` | `member_verification_{model}.csv` from a batch |
-| `ner_source` | `ner_{model}.csv` from the same batch, for NER confidences |
-
-The three are set in an **input sources** block at the top of the script, not
-in `config.py` or `.env`. Point both batch sources at the same batch and model:
-their rows are joined on chart and page, so mixing them would line up the wrong
-pages. Then just run it:
-
-```powershell
-.\.venv\Scripts\python.exe V1_MVuild_member_csvs.py
-```
-
-`--member-list-source`, `--member-verification-source`, `--ner-source` and
-`--out` override those values for one run. `OUTPUT_DIR` is created if it does
-not exist, and the three filenames are fixed, so a re-run overwrites them in
-place:
-
-- `member_list.csv` — one row per chart in the system data
-- `member_extraction_results.csv` — one row per page
-- `member_verification_summary.csv` — one row per chart
-
-**Confidence.** A value the rules matched scores a draw from
-`RULE_BASED_CONFIDENCE_RANGE` (0.92-0.98), taken per field, so a rules hit does
-not read as absolute certainty. An NER value scores the mean of the hits it was
-built from — the NER CSV records raw
-hits while the reported value is merged and trimmed, so `Benjamin` (0.9809) +
-`Benjamin` (0.9898) become `Benjamin Benjamin` at `0.9853`. A page's
-`confidence` is the mean over the fields that hold a value; fields with nothing
-detected are left out rather than counted as zero, and a page with no
-detections is `0`. A chart's `confidence` is the mean over its pages.
-
-`NER_SOURCE` may only be `None` for a batch with no NER detections at all;
-otherwise the run stops, because writing `0` for an unscored NER value would
-read as "nothing detected".
-
-## Accept / reject rules
-
-Each page lands in one bucket (`V1_MV/Rules/what_if_rules.py`):
-
-| Bucket | Meaning | Counts against the document |
-|---|---|---|
-| `Verified` | expected member matched | no |
-| `Wrong_Member` | a patient-name context names someone else | yes |
-| `Not_Verified` | nothing detected (or the right name without corroboration) | no |
-
-The whole document is rejected once the wrong-member pages reach **5 pages or
-10% of the pages, whichever comes first**. A page that failed verification
-because nothing was detected is not considered. Delete / move / split handling
-is not implemented.
-
-Because a wrong-member page rejects a whole chart, that signal comes from one
-place only (`Rules/wrong_member_rules.py`): the people the NER model recognised
-in the sentence around a patient-name key. If none of them verifies as the
-expected member, the page carries a wrong member; if the model recognises
-nobody, the page is not considered. Nothing reads names by token scanning --
-that cannot tell a person from prose, and it read `Patient Health
-Questionnaire` as a member. An attending physician or signer who shares the
-member's surname is never counted either, because they sit outside the name
-sentence.
-
-Hits the model labels "person" are still filtered before they count as a
-member: non-name words are trimmed off the ends (`FIN: Benjamin Benjamin` ->
-`Benjamin Benjamin`) and a hit is dropped when one survives inside it, so
-`the patient`, `my medical assistant` and `patient or family` never reach the
-decision.
-
-## Two layers per page
-
-Every page goes through the rules first and only escalates when they come up
-empty:
-
-1. **Rules, over the whole page** — name, DOB and member ID are searched for
-   across the full page text. A page whose details the rules match costs no
-   model time at all.
-2. **NER, over a key sentence** — only for a field the rules missed. The
-   sentence around that field's key is cut out of the page and the model reads
-   it. A page that failed verification also escalates here, to find out whether
-   another member is named on it.
-
-`Detection_Source_Name` / `_DOB` / `_MemberID` record which layer produced each
-value, and `ner_key_source_*` records the key the sentence was built from.
-
-## Key sentences
-
-`extractors/ner_based/keys.py` cuts a real sentence out of the page around each
-key ("Patient Name: Robert Smith") and NER reads that. Sentences end at a
-newline, a run of spaces (OCR's column separator), a full stop or a pipe, and
-when a key ends its line the value underneath is pulled in, so all of these
-give NER the same clean input:
-
-| Page text | Sentence NER reads |
-|---|---|
-| `Patient Name: Maria Garcia  DOB: 1/15/1980` | `Patient Name: Maria Garcia` |
-| `Patient Name:` ⏎ `  Maria Garcia` | `Patient Name: Maria Garcia` |
-| `PATIENT NAME` ⏎ `Maria Garcia` | `PATIENT NAME Maria Garcia` |
-| `Pt Name: Maria Garcia \| DOB: 1/15/1980` | `Pt Name: Maria Garcia` |
-
-The name, DOB and member-ID NER passes all read these sentences. A name with no
-key anywhere on the page is still found by the rule-based whole-page scan.
-
-## NER toggles (`.env`)
-
-```
-GLINER_LARGE=true
-GLINER_MEDIUM=true
-GLINER_LOW=true
+.\.venv\Scripts\python.exe V1_MV\run.py                 # OCR from blob
+.\.venv\Scripts\python.exe V1_MV\run_selected.py        # page count <= MAX_PAGES in .env
+.\.venv\Scripts\python.exe V1_MV\run_local.py           # OCR JSON on disk
+.\.venv\Scripts\python.exe V1_MV\build_member_csvs.py   # member CSVs from a finished batch
 ```

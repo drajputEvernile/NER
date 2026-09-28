@@ -1,11 +1,11 @@
-# Start Manual Review UI
+# Start the KV Extraction UI
 
 From the repo root (`E:\Projects\NER`):
 
 ## Start backend
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn Review_UI.backend.app:app --app-dir KV_Extraction --host 127.0.0.1 --port 5175 --reload
+.\.venv\Scripts\python.exe -m uvicorn Review_UI.backend.app:app --app-dir KV_Extraction --host 127.0.0.1 --port 3000 --reload
 ```
 
 ## Start frontend
@@ -15,14 +15,13 @@ cd KV_Extraction\Review_UI\frontend
 npm run dev
 ```
 
-Then open http://127.0.0.1:5174
+Then open http://127.0.0.1:3001 — the home page lists every `KV_Run_*` batch under `Run_Output` (`{Output_Root}/Runs`).
 
-## Master Data: select records (optional CLI)
-
-Eligible = folders under `Raw_Input` with ≤ `Master_Data_Max_Pages` (config). Writes `Data/Master_Data/selected_records.json`.
+## Create a batch
 
 ```powershell
-.\.venv\Scripts\python.exe -m Master_Data_Builder.select_records -N 20
+.\.venv\Scripts\python.exe KV_Extraction\run.py --fresh
 ```
 
-(Or use **Select records** inside the Master Data Builder UI.)
+Reruns of an existing batch can be started from the home page (Rerun button) or with
+`run.py --fresh --records-from KV_Run_... --model-version v0`.

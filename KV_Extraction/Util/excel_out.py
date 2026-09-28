@@ -48,21 +48,22 @@ FIELD_SPECS = [
         "extra_value_cols": (("SignatureDate", "SignatureDate"),),
         "summary_extra": (("ESign_Date", "SignatureDate"),),
     },
+    {
+        "prefix": "DOS",
+        "detail": "extraction_dos.csv",
+        "value_col": "Value",
+        "summary_col": "DOS",
+        "extra_value_cols": (),
+    },
+    {
+        "prefix": "PageNo",
+        "detail": "extraction_page.csv",
+        "value_col": "Value",
+        "summary_col": "PageTotal",
+        "summary_value_col": "PageTotal",
+        "extra_value_cols": (),
+    },
 ]
-
-HIT_ATTRS = [
-    ("Key", "Key", False),
-    ("Region", "Region", True),
-    ("Sentence", "Sentence", True),
-    ("Ner_Text", "Ner_Text", True),
-    ("Value", "Value", True),
-    ("Score", "Score", True),
-    ("Accepted", "Accepted", True),
-    ("Selected", "Selected", True),
-    ("Source", "Source", True),
-    ("Accuracy", "Accuracy", True),
-]
-
 
 def _list_cell(items: list[str]) -> str:
     return json.dumps(items, ensure_ascii=False)
@@ -248,6 +249,8 @@ def build_extraction_frames(
             "PName": "",
             "ESign_Provider": "",
             "ESign_Date": "",
+            "DOS": "",
+            "PageTotal": "",
             "TimeSeconds": (
                 f"{time_seconds[record_id]:.3f}" if record_id in time_seconds else ""
             ),
@@ -257,7 +260,9 @@ def build_extraction_frames(
             if frame.empty:
                 continue
             group = frame[frame["RecordId"].astype(str) == record_id]
-            summary[spec["summary_col"]] = _selected_summary(group, spec["value_col"])
+            summary[spec["summary_col"]] = _selected_summary(
+                group, spec.get("summary_value_col") or spec["value_col"]
+            )
             for summary_name, source_col in spec.get("summary_extra") or ():
                 summary[summary_name] = _selected_summary(group, source_col)
         summary_rows.append(summary)
@@ -273,6 +278,8 @@ def build_extraction_frames(
             "PName",
             "ESign_Provider",
             "ESign_Date",
+            "DOS",
+            "PageTotal",
             "TimeSeconds",
         ],
     )

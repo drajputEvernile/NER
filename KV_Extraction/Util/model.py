@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 
 from Util import config
@@ -123,18 +124,27 @@ def get_model():
     raise RuntimeError(f"GLiNER could not be loaded from {model_dir}: {last_error}") from last_error
 
 
+@lru_cache(maxsize=2048)
+def _predict_cached(snippet: str, labels: tuple[str, ...], threshold: float) -> tuple[tuple, ...]:
+    hits = get_model().predict_entities(snippet, list(labels), threshold=threshold) or []
+    return tuple(
+        (
+            str(hit.get("text") or "").strip(),
+            str(hit.get("label") or ""),
+            float(hit.get("score") or 0),
+            hit.get("start"),
+            hit.get("end"),
+        )
+        for hit in hits
+    )
+
+
 def predict(text: str, labels: list[str], threshold: float = 0.25) -> list[dict]:
+    """GLiNER entities; the same sentence + labels on a page is only run once."""
     snippet = (text or "").strip()
     if not snippet:
         return []
-    hits = get_model().predict_entities(snippet, labels, threshold=threshold) or []
     return [
-        {
-            "text": str(hit.get("text") or "").strip(),
-            "label": str(hit.get("label") or ""),
-            "score": float(hit.get("score") or 0),
-            "start": hit.get("start"),
-            "end": hit.get("end"),
-        }
-        for hit in hits
+        {"text": found, "label": label, "score": score, "start": start, "end": end}
+        for found, label, score, start, end in _predict_cached(snippet, tuple(labels), threshold)
     ]
