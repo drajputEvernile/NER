@@ -1,0 +1,408 @@
+{
+  "version": "v001",
+  "description": "v001: first ranker on the fully reviewed 49-page batch (rules after review fixes)",
+  "trained_at": "2026-09-27T15:14:01",
+  "dataset": "ds_20260927_151216",
+  "dataset_pages": 49,
+  "train_records": [
+    "FIle4",
+    "File1",
+    "File2",
+    "File3"
+  ],
+  "test_records": [],
+  "min_groups": 30,
+  "params": {
+    "objective": "binary",
+    "learning_rate": 0.05,
+    "num_leaves": 15,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.9,
+    "bagging_freq": 1,
+    "lambda_l2": 1.0,
+    "min_data_per_group": 5,
+    "cat_smooth": 10,
+    "verbose": -1,
+    "seed": 7,
+    "num_threads": 0,
+    "rounds": 200
+  },
+  "fields_trained": [
+    "dob",
+    "dos",
+    "electronic_signature",
+    "heading_heron",
+    "member_id",
+    "name",
+    "page_no",
+    "provider_name"
+  ],
+  "fields": {
+    "dob": {
+      "groups": 49,
+      "candidates": 49,
+      "trained": true,
+      "positives": 42,
+      "threshold": 0.5,
+      "threshold_from": "out-of-fold over 4 record folds (objective 97.7)",
+      "top_features": [
+        {
+          "feature": "value_x0",
+          "gain": 89.01
+        },
+        {
+          "feature": "value_x1",
+          "gain": 88.6
+        },
+        {
+          "feature": "rule_selected",
+          "gain": 59.01
+        },
+        {
+          "feature": "rule_score",
+          "gain": 45.93
+        },
+        {
+          "feature": "value_y0",
+          "gain": 41.1
+        },
+        {
+          "feature": "key_edit_distance",
+          "gain": 28.0
+        },
+        {
+          "feature": "value_y1",
+          "gain": 13.75
+        },
+        {
+          "feature": "rule_accepted",
+          "gain": 6.45
+        },
+        {
+          "feature": "line_gap",
+          "gain": 2.42
+        },
+        {
+          "feature": "word_gap",
+          "gain": 0.16
+        }
+      ]
+    },
+    "member_id": {
+      "groups": 49,
+      "candidates": 85,
+      "trained": true,
+      "positives": 64,
+      "threshold": 0.3,
+      "threshold_from": "out-of-fold over 4 record folds (objective 92.9)",
+      "top_features": [
+        {
+          "feature": "rule_accepted",
+          "gain": 346.27
+        },
+        {
+          "feature": "rule_score",
+          "gain": 160.5
+        },
+        {
+          "feature": "value_x0",
+          "gain": 129.98
+        },
+        {
+          "feature": "word_gap",
+          "gain": 48.62
+        },
+        {
+          "feature": "digit_ratio",
+          "gain": 29.96
+        },
+        {
+          "feature": "value_x1",
+          "gain": 29.89
+        },
+        {
+          "feature": "key_x1",
+          "gain": 27.73
+        },
+        {
+          "feature": "value_y1",
+          "gain": 22.48
+        },
+        {
+          "feature": "record_value_share",
+          "gain": 20.74
+        },
+        {
+          "feature": "rule_selected",
+          "gain": 16.24
+        }
+      ]
+    },
+    "name": {
+      "groups": 49,
+      "candidates": 68,
+      "trained": true,
+      "positives": 60,
+      "threshold": 0.5,
+      "threshold_from": "out-of-fold over 4 record folds (objective 95.2)",
+      "top_features": [
+        {
+          "feature": "value_y0",
+          "gain": 171.46
+        },
+        {
+          "feature": "record_value_share",
+          "gain": 98.59
+        },
+        {
+          "feature": "rule_score",
+          "gain": 80.48
+        },
+        {
+          "feature": "value_x1",
+          "gain": 74.4
+        },
+        {
+          "feature": "word_gap",
+          "gain": 19.09
+        },
+        {
+          "feature": "rule_selected",
+          "gain": 13.36
+        },
+        {
+          "feature": "line_gap",
+          "gain": 1.14
+        },
+        {
+          "feature": "n_field_keys",
+          "gain": 0.85
+        },
+        {
+          "feature": "value_y1",
+          "gain": 0.85
+        },
+        {
+          "feature": "dx",
+          "gain": 0.35
+        }
+      ]
+    },
+    "provider_name": {
+      "groups": 49,
+      "candidates": 49,
+      "trained": true,
+      "positives": 21,
+      "threshold": 0.2,
+      "threshold_from": "out-of-fold over 4 record folds (objective 92.6)",
+      "top_features": [
+        {
+          "feature": "has_comma",
+          "gain": 213.89
+        },
+        {
+          "feature": "rule_score",
+          "gain": 209.72
+        },
+        {
+          "feature": "value_x0",
+          "gain": 73.47
+        },
+        {
+          "feature": "line_gap",
+          "gain": 48.24
+        },
+        {
+          "feature": "value_x1",
+          "gain": 20.21
+        },
+        {
+          "feature": "dx",
+          "gain": 7.82
+        },
+        {
+          "feature": "rule_selected",
+          "gain": 7.72
+        },
+        {
+          "feature": "value_len",
+          "gain": 7.24
+        },
+        {
+          "feature": "record_distinct_values",
+          "gain": 5.76
+        },
+        {
+          "feature": "record_value_share",
+          "gain": 5.59
+        }
+      ]
+    },
+    "electronic_signature": {
+      "groups": 49,
+      "candidates": 17,
+      "trained": true,
+      "positives": 15,
+      "threshold": 0.5,
+      "threshold_from": "out-of-fold over 4 record folds (objective 100.0)",
+      "top_features": [
+        {
+          "feature": "rule_score",
+          "gain": 69.41
+        },
+        {
+          "feature": "rule_accepted",
+          "gain": 40.6
+        },
+        {
+          "feature": "key_x1",
+          "gain": 1.07
+        },
+        {
+          "feature": "key_n_words",
+          "gain": 0.97
+        },
+        {
+          "feature": "rule_selected",
+          "gain": 0.58
+        }
+      ]
+    },
+    "dos": {
+      "groups": 49,
+      "candidates": 115,
+      "trained": true,
+      "positives": 86,
+      "threshold": 0.05,
+      "threshold_from": "out-of-fold over 4 record folds (objective 89.6)",
+      "top_features": [
+        {
+          "feature": "score_gap",
+          "gain": 898.85
+        },
+        {
+          "feature": "value_y0",
+          "gain": 63.27
+        },
+        {
+          "feature": "page_frac",
+          "gain": 58.87
+        },
+        {
+          "feature": "rule_selected",
+          "gain": 32.16
+        },
+        {
+          "feature": "line_gap",
+          "gain": 24.73
+        },
+        {
+          "feature": "dx",
+          "gain": 20.48
+        },
+        {
+          "feature": "key_y1",
+          "gain": 18.09
+        },
+        {
+          "feature": "value_len",
+          "gain": 16.78
+        },
+        {
+          "feature": "key_trusted_reason",
+          "gain": 14.58
+        },
+        {
+          "feature": "key_x0",
+          "gain": 12.32
+        }
+      ]
+    },
+    "page_no": {
+      "groups": 49,
+      "candidates": 39,
+      "trained": true,
+      "positives": 38,
+      "threshold": 0.5,
+      "threshold_from": "out-of-fold over 4 record folds (objective 97.4)",
+      "top_features": [
+        {
+          "feature": "page_frac",
+          "gain": 41.35
+        },
+        {
+          "feature": "value_x0",
+          "gain": 21.75
+        },
+        {
+          "feature": "n_trusted_keys_page",
+          "gain": 12.43
+        },
+        {
+          "feature": "value_y0",
+          "gain": 0.84
+        },
+        {
+          "feature": "value_y1",
+          "gain": 0.17
+        },
+        {
+          "feature": "n_keys_page",
+          "gain": 0.16
+        }
+      ]
+    },
+    "heading_heron": {
+      "groups": 49,
+      "candidates": 651,
+      "trained": true,
+      "positives": 210,
+      "threshold": 0.3,
+      "threshold_from": "out-of-fold over 4 record folds (objective 76.8)",
+      "top_features": [
+        {
+          "feature": "record_value_pages",
+          "gain": 1466.36
+        },
+        {
+          "feature": "value_y0",
+          "gain": 954.56
+        },
+        {
+          "feature": "rule_score",
+          "gain": 555.32
+        },
+        {
+          "feature": "value_x1",
+          "gain": 523.4
+        },
+        {
+          "feature": "record_value_share",
+          "gain": 504.32
+        },
+        {
+          "feature": "upper_ratio",
+          "gain": 503.52
+        },
+        {
+          "feature": "score_gap",
+          "gain": 430.29
+        },
+        {
+          "feature": "value_x0",
+          "gain": 265.92
+        },
+        {
+          "feature": "digit_ratio",
+          "gain": 209.49
+        },
+        {
+          "feature": "n_field_accepted",
+          "gain": 198.18
+        }
+      ],
+      "level_model": "trained on 210 true headings"
+    }
+  },
+  "git_commit": "3bc1ab7"
+}
