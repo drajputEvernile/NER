@@ -53,8 +53,8 @@ RUN_OUTPUT = Path(r"E:\Projects\NER\Data\Output\Runs")
 # Where export writes (and merge / install read) the records.
 TRAINING_DATA = Path(r"E:\Projects\NER\NER\Training Data")
 
-# Every file and part file stays under this many characters (the chat paste limit is 250000).
-MAX_PART_CHARS = 190000
+# Every file and part file stays under this many characters (a paste that works reliably is 40000).
+MAX_PART_CHARS = 40000
 
 # ------------------------------------------------------------------ helpers
 

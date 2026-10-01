@@ -1,0 +1,23 @@
+/* Data Set Chooser: the Review UI layout with one image column and no review panels. */
+
+.chooser-split {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.chooser-split > .pages-col {
+  border-right: none;
+}
+
+.chooser-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.chooser-paths {
+  margin: 0.1rem 0 0;
+  font-size: 0.74rem;
+  color: var(--neutral-500);
+}
