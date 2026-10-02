@@ -1,0 +1,560 @@
+/* ---- Home: batches ------------------------------------------------------------------- */
+
+.kv-run-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.kv-run-name .landing-col-name {
+  max-width: none;
+}
+
+.landing-history-table th,
+.landing-history-table td {
+  white-space: nowrap;
+}
+
+.kv-run-sub {
+  margin-top: 0.15rem;
+  font-size: 0.74rem;
+  color: var(--neutral-500);
+}
+
+.kv-count {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--neutral-500);
+}
+
+.kv-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: auto;
+}
+
+.kv-total-row td {
+  font-weight: 600;
+  background: var(--neutral-50);
+}
+
+.kv-subtotal-row td {
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.kv-subhead {
+  margin: 0.2rem 0 0;
+  font-family: var(--heading);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.kv-pre {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.kv-version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.kv-version-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  cursor: pointer;
+}
+
+.kv-version-option.active {
+  border-color: var(--primary);
+  background: var(--brand-50);
+}
+
+.kv-version-option.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.kv-version-option input {
+  margin-top: 0.2rem;
+}
+
+.kv-version-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.84rem;
+  color: var(--neutral-600);
+}
+
+.kv-version-text strong {
+  font-family: var(--heading);
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.kv-version-note {
+  font-weight: 600;
+  color: var(--status-warning-fg);
+}
+
+/* ---- Batch review: layout ------------------------------------------------------------ */
+
+.workspace {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.jobs-pane {
+  flex-shrink: 0;
+}
+
+/* ---- Batch review: OCR panel --------------------------------------------------------- */
+
+.kv-ocr-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.kv-ocr-header p {
+  margin: 0 0 0.6rem;
+}
+
+.kv-search {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.84rem;
+  background: var(--card);
+  color: var(--text);
+}
+
+.kv-ocr-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.kv-ocr-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.4rem;
+}
+
+.kv-word {
+  border-radius: 3px;
+  padding: 0 0.1rem;
+}
+
+.kv-word:hover {
+  background: var(--status-info-bg);
+  outline: 1px solid var(--status-info-fg);
+}
+
+.kv-word.match {
+  background: #fff2b3;
+}
+
+.kv-word.cand {
+  background: rgba(47, 113, 218, 0.16);
+}
+
+.kv-word.picked {
+  background: var(--success-bg);
+  outline: 1px solid var(--success);
+  color: var(--success);
+  font-weight: 600;
+}
+
+.kv-picking .kv-word {
+  cursor: pointer;
+  user-select: none;
+}
+
+/* ---- Batch review: page image boxes -------------------------------------------------- */
+
+.page-bbox-overlay.picking {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.page-bbox-rect.kv-key {
+  fill: rgba(217, 119, 6, 0.18);
+  stroke: #d97706;
+}
+
+.page-bbox-rect.kv-value {
+  fill: rgba(47, 113, 218, 0.22);
+  stroke: var(--status-info-fg);
+}
+
+.page-bbox-rect.kv-picked {
+  fill: rgba(29, 135, 67, 0.25);
+  stroke: var(--status-success-fg);
+}
+
+.page-bbox-rect.kv-hover {
+  fill: rgba(47, 113, 218, 0.1);
+  stroke: var(--status-info-fg);
+  stroke-dasharray: 4 3;
+}
+
+.thumb.kv-thumb-done span {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+/* ---- Batch review: review panel ------------------------------------------------------ */
+
+.kv-reviewer label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--neutral-700);
+}
+
+.kv-reviewer input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+  font-weight: 400;
+  background: var(--card);
+  color: var(--text);
+}
+
+.kv-page-info label {
+  white-space: nowrap;
+}
+
+.kv-page-info input {
+  flex: 0 1 6rem;
+  min-width: 3.5rem;
+}
+
+.kv-page-info .btn {
+  padding: 0.3rem 0.8rem;
+  font-size: 0.78rem;
+}
+
+.kv-page-info .mr-note {
+  margin: -0.35rem 0 0.55rem;
+}
+
+.kv-acc-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.kv-acc-sub {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--neutral-500);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kv-cand {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.kv-cand.extracted {
+  border-left: 3px solid var(--status-info-fg);
+}
+
+.kv-cand.correct {
+  background: var(--success-bg);
+}
+
+.kv-cand.incorrect {
+  background: var(--danger-bg);
+}
+
+.kv-cand-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.kv-cand-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.kv-cand-value {
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.kv-cand-value em {
+  font-family: var(--font);
+  font-weight: 400;
+  color: var(--neutral-500);
+}
+
+.kv-cand-detail {
+  font-weight: 400;
+  color: var(--neutral-600);
+}
+
+.kv-cand-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.kv-chip {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--neutral-100);
+  color: var(--neutral-600);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kv-chip.extracted {
+  background: var(--status-info-bg);
+  color: var(--status-info-fg);
+  font-weight: 700;
+}
+
+.kv-reason {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 0.82rem;
+  background: var(--card);
+  color: var(--text);
+}
+
+.kv-chip.kv-chip-note {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+}
+
+.kv-group-label {
+  margin: 0.6rem 0 0.05rem;
+  padding-top: 0.55rem;
+  border-top: 1px dashed var(--border);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--neutral-600);
+}
+
+.kv-level-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: var(--neutral-600);
+}
+
+.kv-level {
+  flex: 0 0 auto;
+  min-width: 7.5rem;
+}
+
+.kv-section-label {
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--neutral-500);
+}
+
+.kv-added {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px dashed var(--neutral-300);
+  border-radius: 8px;
+  background: var(--neutral-50);
+}
+
+.kv-cand.rejected:not(.correct):not(.incorrect) {
+  background: var(--neutral-50);
+}
+
+.kv-cand.rejected .kv-cand-value {
+  color: var(--neutral-600);
+}
+
+.kv-correction {
+  background: var(--card);
+}
+
+.kv-correction-title,
+.kv-block-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--neutral-700);
+}
+
+.kv-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px dashed var(--neutral-300);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.kv-pick-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.kv-pick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--neutral-700);
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 0.25rem 0.55rem;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.kv-pick-btn.active {
+  border-color: var(--success);
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.kv-pick-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mr-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.kv-check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.84rem;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.kv-notes {
+  max-width: none;
+}
+
+.kv-actions {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.kv-link-btn {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--brand-700);
+  cursor: pointer;
+}
+
+.kv-link-btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.kv-link-btn.danger {
+  color: var(--danger);
+}
+
+.kv-done {
+  margin-top: 0.6rem;
+}
+
+/* Narrow screens stack image, OCR and review; the viewer needs a real height there. */
+@media (max-width: 1100px) {
+  .review-pane {
+    overflow-y: auto;
+  }
+
+  .review-pane > .master-triple-split {
+    flex: none;
+  }
+
+  .master-triple-split > .pages-col {
+    height: 62vh;
+    max-height: none;
+    flex-shrink: 0;
+  }
+
+  .master-triple-split > .master-side-panel {
+    min-height: 45vh;
+    max-height: 70vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+/* ---- Review: selected OCR words ------------------------------------------------------ */
+
+.kv-selected-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--neutral-50);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.kv-selected-text em {
+  color: var(--neutral-500);
+}

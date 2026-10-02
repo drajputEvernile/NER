@@ -1,0 +1,46 @@
+{
+ "assessment 4": [
+  1,
+  0
+ ],
+ "care plan": [
+  1,
+  0
+ ],
+ "exam": [
+  1,
+  0
+ ],
+ "fh": [
+  1,
+  0
+ ],
+ "finding": [
+  1,
+  0
+ ],
+ "health maintenance": [
+  1,
+  0
+ ],
+ "medical problems": [
+  1,
+  0
+ ],
+ "objective": [
+  1,
+  0
+ ],
+ "pmh": [
+  1,
+  0
+ ],
+ "subjective": [
+  1,
+  0
+ ],
+ "surgical hx": [
+  1,
+  0
+ ]
+}

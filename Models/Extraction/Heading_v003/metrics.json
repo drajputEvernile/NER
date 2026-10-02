@@ -1,0 +1,57 @@
+{
+  "test": null,
+  "train_optimistic": {
+    "fields": {
+      "heading_heron": {
+        "trained": true,
+        "v0": {
+          "pages": 3,
+          "tp": 7,
+          "fp": 0,
+          "fn": 7,
+          "level_ok": 7,
+          "right": 7,
+          "wrong": 0,
+          "missed": 7,
+          "accuracy": 50.0,
+          "precision": 100.0,
+          "recall": 50.0,
+          "level_accuracy": 100.0,
+          "page_accuracy": 33.3
+        },
+        "model": {
+          "pages": 3,
+          "tp": 11,
+          "fp": 0,
+          "fn": 3,
+          "level_ok": 11,
+          "right": 11,
+          "wrong": 0,
+          "missed": 3,
+          "accuracy": 78.6,
+          "precision": 100.0,
+          "recall": 78.6,
+          "level_accuracy": 100.0,
+          "page_accuracy": 66.7
+        }
+      }
+    },
+    "kv_overall": {},
+    "overall": {
+      "v0": {
+        "right": 7,
+        "wrong": 0,
+        "missed": 7,
+        "pages": 3,
+        "accuracy": 50.0
+      },
+      "model": {
+        "right": 11,
+        "wrong": 0,
+        "missed": 3,
+        "pages": 3,
+        "accuracy": 78.6
+      }
+    }
+  }
+}

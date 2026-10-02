@@ -6,7 +6,10 @@ Azure V2
 Azure V2.zip
 azure_blob
 Azure_OCR
-Models
+# Models: the public base models (gliner_low, layout_heron) are downloaded on the first run and the
+# retired ones stay local; only the trained versions in Models/Extraction are committed.
+Models/*
+!Models/Extraction/
 
 # Data
 Data/

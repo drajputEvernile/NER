@@ -1,0 +1,90 @@
+{
+  "version": "v003",
+  "model": "Heading_Detector",
+  "description": "Experimental checkpoint: trained on New1 only (1 record, 3 pages) to verify the two-model pipeline end to end. Not a quality measure; rules (v0) remain the reference.",
+  "trained_at": "2026-10-02T17:45:40",
+  "dataset": "ds_20261002_174538",
+  "dataset_pages": 3,
+  "split": "all",
+  "train_records": [
+    "New1"
+  ],
+  "test_records": [],
+  "min_groups": 3,
+  "params": {
+    "objective": "binary",
+    "learning_rate": 0.05,
+    "num_leaves": 15,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.9,
+    "bagging_freq": 1,
+    "lambda_l2": 1.0,
+    "min_data_per_group": 5,
+    "cat_smooth": 10,
+    "verbose": -1,
+    "seed": 7,
+    "num_threads": 0,
+    "rounds": 200
+  },
+  "fields_trained": [
+    "heading_heron"
+  ],
+  "fields": {
+    "heading_heron": {
+      "groups": 3,
+      "candidates": 55,
+      "vocabulary": {
+        "texts": 40,
+        "true_heading_texts": 11
+      },
+      "trained": true,
+      "positives": 14,
+      "threshold": 0.5,
+      "threshold_from": "default (one record: no out-of-fold scores)",
+      "top_features": [
+        {
+          "feature": "heading_whole_line",
+          "gain": 256.15
+        },
+        {
+          "feature": "value_x1",
+          "gain": 198.52
+        },
+        {
+          "feature": "heading_tail_words",
+          "gain": 39.26
+        },
+        {
+          "feature": "value_len",
+          "gain": 19.0
+        },
+        {
+          "feature": "value_y0",
+          "gain": 18.79
+        },
+        {
+          "feature": "value_x0",
+          "gain": 11.32
+        },
+        {
+          "feature": "upper_ratio",
+          "gain": 9.49
+        },
+        {
+          "feature": "score_rank",
+          "gain": 4.95
+        },
+        {
+          "feature": "heading_height_ratio",
+          "gain": 1.73
+        },
+        {
+          "feature": "heading_ends_colon",
+          "gain": 1.69
+        }
+      ],
+      "level_model": "not trained (too few true headings with both levels); rules' level kept"
+    }
+  },
+  "git_commit": "068d306"
+}
