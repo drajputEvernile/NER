@@ -1,5 +1,9 @@
 """Run both extraction models on every document into one Excel workbook, with a resumable queue.
 
+The queue is built from the record folders under Raw_Input (each holding that record's page images);
+every one is looked up in OCR_Input, and the run starts on the records that have OCR JSON. A record
+with no usable OCR is listed in the queue (no_ocr) and in the log, never silently dropped.
+
 Each page is parsed once and its catalog keys are found once. The KV_Extraction model (DOB,
 Member ID, Member Name, Provider Name, E-signature, DOS, Page No) reads the OCR JSON only. The
 Heading_Detector model runs after it, on the OCR JSON and the page image, for each layout
@@ -84,7 +88,7 @@ from Training.features import (
     sheet_columns,
 )
 from Training.model import apply_models
-from Util.documents import load_local_documents
+from Util.documents import MissingOcr, load_documents
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +229,8 @@ def _new_queue(
     max_pages: int = 0,
     model_version: str = config.Default_Model_Version,
     source_run: str | None = None,
+    raw_records: int = 0,
+    no_ocr: list[MissingOcr] | None = None,
 ) -> dict[str, Any]:
     ner_name, ner_path, ner_ok, ner_error = _probe_ner_model()
     run_folder = _run_folder(run_id)
@@ -244,6 +250,13 @@ def _new_queue(
         "ner_model_path": ner_path,
         "ner_model_loaded": ner_ok,
         "ner_model_error": ner_error,
+        "raw_input": str(config.Raw_Input),
+        "ocr_input": str(config.OCR_Input),
+        "raw_records": raw_records,
+        # Raw records the OCR folder has nothing usable for: not in the queue's documents, kept here.
+        "no_ocr": [
+            {"record_id": item.record_id, "page_count": item.image_count, "reason": item.reason} for item in no_ocr or []
+        ],
         "total_docs": len(documents),
         "total_pages": _page_count(documents),
         "completed_documents": 0,
@@ -379,17 +392,29 @@ def run_all(
     if not registry.is_runnable(model_version):
         raise SystemExit(f"Extraction model version {model_version!r} cannot run yet")
     config.make_output_folders()
-    all_documents = load_local_documents(config.OCR_Input)
+    all_documents, no_ocr, raw = load_documents(config.Raw_Input, config.OCR_Input)
+    if not raw:
+        raise SystemExit(f"No record folders with page images under {config.Raw_Input}")
+    logger.info(
+        "Raw_Input: %s records; OCR found for %s, none usable for %s",
+        len(raw),
+        len(all_documents),
+        len(no_ocr),
+    )
+    for item in no_ocr:
+        logger.warning("no OCR for %s (%s page images): %s", item.record_id, item.image_count, item.reason)
     if not all_documents:
-        raise SystemExit(f"No OCR JSON under {config.OCR_Input}")
+        raise SystemExit(f"None of the {len(raw)} records under {config.Raw_Input} has OCR under {config.OCR_Input}")
     if records_from:
         wanted = set(_source_records(records_from))
         all_documents = [document for document in all_documents if document.record_id in wanted]
+        no_ocr = [item for item in no_ocr if item.record_id in wanted]
         if not all_documents:
-            raise SystemExit(f"None of the documents of {records_from} are under {config.OCR_Input}")
+            raise SystemExit(f"None of the documents of {records_from} have OCR under {config.OCR_Input}")
 
     page_range = _page_range_text(min_pages, max_pages)
     documents, skipped = _filter_by_pages(all_documents, min_pages, max_pages)
+    no_ocr = [item for item in no_ocr if _in_page_range(item.image_count, min_pages, max_pages)]
     for document in skipped:
         logger.info("skip %s pages=%s (%s)", document.record_id, len(document.pages), page_range)
     if skipped:
@@ -403,7 +428,7 @@ def run_all(
     if not documents:
         raise SystemExit(
             f"No documents left after the page filter ({page_range}) "
-            f"(scanned {len(all_documents)} under {config.OCR_Input})"
+            f"(found OCR for {len(all_documents)} of the {len(raw)} records under {config.Raw_Input})"
         )
 
     queue_path = _queue_path()
@@ -427,14 +452,17 @@ def run_all(
             max_pages=max_pages,
             model_version=model_version,
             source_run=Path(records_from).name if records_from else None,
+            raw_records=len(raw),
+            no_ocr=no_ocr,
         )
         _save_queue(queue)
         logger.info(
-            "started run %s %s (%s docs / %s pages)",
+            "started run %s %s (%s docs / %s pages; %s records without OCR left out)",
             run_id,
             page_range,
             queue["total_docs"],
             queue["total_pages"],
+            len(queue["no_ocr"]),
         )
     else:
         logger.info("resuming run %s from %s", queue.get("run_id"), queue_path)
@@ -486,7 +514,7 @@ def run_all(
             document = by_id.get(record_id)
             if document is None:
                 document_meta["status"] = "error"
-                document_meta["error"] = "document missing from OCR_Input"
+                document_meta["error"] = "document has no OCR under OCR_Input"
                 _save_queue(queue)
                 continue
             document_meta["status"] = "in_progress"
@@ -532,6 +560,7 @@ def run_all(
             "workbook": str(workbook_path),
             "completed_documents": queue["completed_documents"],
             "completed_pages": queue["completed_pages"],
+            "records_without_ocr": [item["record_id"] for item in queue.get("no_ocr") or []],
             "total_time_seconds": queue["total_time_seconds"],
             "avg_time_per_doc": queue["avg_time_per_doc"],
             "avg_time_per_page": queue["avg_time_per_page"],

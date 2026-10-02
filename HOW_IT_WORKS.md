@@ -142,9 +142,14 @@ and boxes alone and never opens the image; only the heading model and the Review
 
 ## 4. A run: what `run.py` does
 
-1. **Queue.** A new run gets an id from the clock and a queue listing every document with its page
-   count and status, saved to `{Run_Output}/kv_run_queue.json` and copied into the run as `run.json`.
-   `-N`, `-M` and `--records-from` choose the documents.
+1. **Queue.** The record folders under `Raw_Input` (each holding that record's page images) decide
+   which records exist; every one is looked up by name in `OCR_Input` (case-insensitive) and the run
+   starts on the records that have OCR JSON. A record with no usable OCR (no folder, no JSON, or no
+   pages) is not queued but is listed under `no_ocr` in `run.json`, logged as a warning and printed at
+   the end; an OCR folder with no raw folder is ignored. A run gets an id from the clock and a queue
+   listing every document with its page count and status, saved to `{Run_Output}/kv_run_queue.json`
+   and copied into the run as `run.json`. `-N`, `-M` and `--records-from` choose the documents (the
+   page count is the OCR's, or the number of images for a record without OCR).
 2. **Models load once** (GLiNER, the heading detector, and the trained versions if asked), fully
    offline. If one can't load the run stops with the error instead of quietly finding nothing.
 3. **Per document**, every page goes through `pipeline.extract_document`: KV_Extraction first

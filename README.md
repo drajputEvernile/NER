@@ -54,7 +54,8 @@ A run saves exactly two files: `run.json` and `KV_Extraction.xlsx` (sheets `Memb
 ## Run the extraction
 
 ```powershell
-# New run over every document
+# New run over every record folder in Raw_Input that has OCR in OCR_Input
+# (records without OCR are listed in the log and in run.json, not run)
 .\.venv\Scripts\python.exe Extraction\run.py --fresh
 
 # Resume a stopped run
