@@ -65,11 +65,11 @@ COLUMNS = [
 ]
 
 
-# ---------------------------------------------------------------- workbook layout
-# One workbook per run (KV_Extraction.xlsx) holds everything: a sheet per key-value field and one
+# ---------------------------------------------------------------- table layout
+# One folder of tables per run (KV_Extraction/*.csv, one CSV per sheet) holds everything: a sheet per key-value field and one
 # for headings, each with a row per candidate (the candidate log, plus the reviewer's verdict once
 # reviewed), and Overall with the selected value of every field per page. The log columns above are
-# the training features; the sheet names some of them differently for people reading the workbook.
+# the training features; the sheet names some of them differently for people reading the tables.
 
 SHEETS: dict[str, str] = {
     "name": "Member_Name",
@@ -117,7 +117,7 @@ def _truthy_series(series: pd.Series) -> pd.Series:
 
 
 def log_to_sheet(log: pd.DataFrame, heading: bool) -> pd.DataFrame:
-    """A field's candidate-log rows as workbook rows (accepted / selected are what the run
+    """A field's candidate-log rows as table rows (accepted / selected are what the run
     extracted: the trained model's call when it made one, else the rules')."""
     out = log.copy()
     for column in REVIEW_COLUMNS:
@@ -134,7 +134,7 @@ def log_to_sheet(log: pd.DataFrame, heading: bool) -> pd.DataFrame:
 
 
 def sheet_to_log(sheet: pd.DataFrame, field: str) -> pd.DataFrame:
-    """Workbook rows back to the candidate-log columns every trainer and scorer reads. The
+    """Table rows back to the candidate-log columns every trainer and scorer reads. The
     reviewer's own rows (source 'review') are not candidates, so they are left out."""
     out = sheet[sheet["source"].astype(str) != REVIEW_SOURCE].copy()
     out["rule_source"] = out["source"]

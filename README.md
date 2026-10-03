@@ -3,7 +3,7 @@
 Local pipeline that reads the OCR JSON of chart pages and extracts, in one pass per page: Member
 DOB, Member ID, Member Name, Provider Name, E-Signature, Date of Service, Page No and Headings.
 Two separate models do it: **KV_Extraction** (OCR JSON only) and **Heading_Detector** (OCR JSON and
-the page image). Each run saves one workbook, reviews are written into it, and that workbook trains
+the page image). Each run saves one folder of CSV tables, reviews are written into them, and those tables train
 the next model version. Everything runs on this machine; no page data leaves it.
 
 How every part works: [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
@@ -13,7 +13,7 @@ flowchart LR
     OCR[OCR JSON] --> Run[Extraction\run.py]
     Raw[Page images] --> Run
     Models[Models\gliner_low, layout_heron<br/>Models\Extraction] --> Run
-    Run --> WB[KV_Run_*\KV_Extraction.xlsx]
+    Run --> WB[KV_Run_*\KV_Extraction\*.csv]
     WB --> UI[Review UI]
     UI -->|reviews| WB
     WB --> Train[Training: dataset / train]
@@ -48,8 +48,9 @@ Every path is a full absolute path set in this file and nowhere else; set them f
 | `Extraction_Models` | `Models\Extraction\`: the trained models `KV_vNNN` and `Heading_vNNN`, **committed to git** so they travel to another machine |
 | `Retired_Models` | `Models\_retired\`: models trained before this layout, kept and never loaded |
 
-A run saves exactly two files: `run.json` and `KV_Extraction.xlsx` (sheets `Member_Name`,
-`Member_ID`, `Member_DOB`, `Provider_Name`, `E_Sign`, `DOS`, `Page_No`, `Headings`, `Overall`).
+A run saves `run.json` and a `KV_Extraction\` folder of CSV tables, one file per sheet: `Member_Name.csv`,
+`Member_ID.csv`, `Member_DOB.csv`, `Provider_Name.csv`, `E_Sign.csv`, `DOS.csv`, `Page_No.csv`,
+`Headings.csv`, `Overall.csv`.
 
 ## Run the extraction
 
@@ -82,12 +83,12 @@ A run saves exactly two files: `run.json` and `KV_Extraction.xlsx` (sheets `Memb
 cd Extraction\Review_UI\frontend; npm run dev      # http://127.0.0.1:3001
 ```
 
-Close the workbook in Excel while reviewing: the Review UI writes the reviews into it.
+The Review UI writes each review into the CSV of the sheet it changed, a fraction of a second after you save it.
 
 ## Train
 
 ```powershell
-.\.venv\Scripts\python.exe Extraction\Training\dataset.py             # reviewed workbooks -> labelled dataset
+.\.venv\Scripts\python.exe Extraction\Training\dataset.py             # reviewed tables -> labelled dataset
 .\.venv\Scripts\python.exe Extraction\Training\train.py --model both  # KV_Extraction and Heading_Detector, separately
 .\.venv\Scripts\python.exe Extraction\Training\evaluate.py --version v003 --split test
 ```

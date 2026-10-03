@@ -12,7 +12,7 @@ Two separate models, each with its own inputs:
                     after the key-value model on the same words and keys, because a heading
                     candidate knows whether its words are a KV key.
 
-Everything either model finds is a candidate row (Training/features.py); the workbook (run.py)
+Everything either model finds is a candidate row (Training/features.py); the tables (run.py)
 and the trained versions (Training/model.py) read those rows.
 """
 

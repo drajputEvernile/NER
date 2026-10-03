@@ -86,9 +86,9 @@ def make_output_folders() -> None:
         folder.mkdir(parents=True, exist_ok=True)
 
 
-# One workbook per run holds everything it extracted and, once reviewed, the reviews:
-# {Run_Output}/KV_Run_{run_id}/KV_Extraction.xlsx
-Workbook_Name = "KV_Extraction.xlsx"
+# One folder of CSV tables per run holds everything it extracted and, once reviewed, the reviews
+# (one CSV per sheet): {Run_Output}/KV_Run_{run_id}/KV_Extraction/{Sheet}.csv
+Tables_Folder = "KV_Extraction"
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-> **Superseded in part.** The plan below was written for the earlier layout (separate candidate CSVs, `review/labels.json`, one ranker). Extraction is now two models (KV_Extraction, Heading_Detector) and one workbook per run: see `HOW_IT_WORKS.md` sections 6 to 9 for the current design.
+> **Superseded in part.** The plan below was written for the earlier layout (separate candidate CSVs, `review/labels.json`, one ranker). Extraction is now two models (KV_Extraction, Heading_Detector) and one folder of CSV tables per run: see `HOW_IT_WORKS.md` sections 6 to 9 for the current design.
 
 # Trainable KV Extraction: Plan
 

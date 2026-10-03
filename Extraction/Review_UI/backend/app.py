@@ -1,7 +1,7 @@
 """Local API for the Extraction Review UI.
 
-Runs are the KV_Run_* folders under config.Run_Output that have a KV_Extraction.xlsx. Everything a
-run extracted and everything a reviewer says about it lives in that one workbook (see
+Runs are the KV_Run_* folders under config.Run_Output that have a KV_Extraction/ folder of CSV tables.
+Everything a run extracted and everything a reviewer says about it lives in those tables (see
 Training/labels.py); there is no other review store.
 """
 
@@ -56,12 +56,12 @@ def _save_reviews() -> None:
 
 
 def _run_dirs() -> list[Path]:
-    """Runs that have a workbook, newest first (runs from an older output layout are not listed)."""
+    """Runs that have tables, newest first (runs from an older output layout are not listed)."""
     root = Path(config.Run_Output)
     if not root.is_dir():
         return []
     return sorted(
-        (path for path in root.iterdir() if path.is_dir() and path.name.startswith(RUN_PREFIX) and labels.has_workbook(path)),
+        (path for path in root.iterdir() if path.is_dir() and path.name.startswith(RUN_PREFIX) and labels.has_tables(path)),
         key=run_started,
         reverse=True,
     )
@@ -133,12 +133,8 @@ def _start_from_name(run_dir: Path) -> str | None:
 
 
 def _page_index(run_dir: Path) -> list[dict[str, str]]:
-    """Distinct (record, page, file) of the run, in page order."""
-    frame = labels.run_log(run_dir)
-    if frame.empty:
-        return []
-    pages = frame[["record_id", "page_number", "file_name"]].drop_duplicates()
-    return pages.to_dict("records")
+    """Every page of the run (record, page, file), in file order."""
+    return labels.run_pages(run_dir)
 
 
 def _evaluation(run_dir: Path, all_runs: list[Path]) -> dict[str, Any]:
@@ -274,8 +270,8 @@ def meta() -> dict[str, Any]:
 @app.get("/api/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
     run_dir = _resolve_run_dir(run_id)
-    if not labels.has_workbook(run_dir):
-        raise HTTPException(409, f"{run_id} has no {config.Workbook_Name}; rerun it to review.")
+    if not labels.has_tables(run_dir):
+        raise HTTPException(409, f"{run_id} has no {config.Tables_Folder} tables; rerun it to review.")
     dirs = _run_dirs()
     info = _run_info(run_dir, dirs)
     per_page = labels.reviewed_fields(run_dir, labels.pooled_labels(dirs))
@@ -462,7 +458,7 @@ def versions_accuracy(run_id: str) -> dict[str, Any]:
     run_dir = _resolve_run_dir(run_id)
     store = labels.RunStore.get(run_dir)
     if store is None:
-        raise HTTPException(409, f"{run_id} has no {config.Workbook_Name}.")
+        raise HTTPException(409, f"{run_id} has no {config.Tables_Folder} tables.")
     records = frozenset(store.records())
     dirs = _run_dirs()  # newest first
     groups: dict[str, list[dict[str, Any]]] = {}

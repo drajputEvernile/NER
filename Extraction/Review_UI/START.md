@@ -15,9 +15,9 @@ cd Extraction\Review_UI\frontend
 npm run dev
 ```
 
-Then open http://127.0.0.1:3001. The home page lists every `KV_Run_*` run that has a
-`KV_Extraction.xlsx` under `Run_Output` (`{Output_Root}/Runs`). Keep that workbook closed in Excel
-while reviewing: the UI writes the reviews into it.
+Then open http://127.0.0.1:3001. The home page lists every `KV_Run_*` run that has a `KV_Extraction`
+folder of CSV tables under `Run_Output` (`{Output_Root}/Runs`). The UI writes each review into the
+matching CSV a fraction of a second after you save it.
 
 ## Create a run
 

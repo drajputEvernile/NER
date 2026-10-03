@@ -1,6 +1,6 @@
 """Manual review labels: what reviewers say is on each page, per field.
 
-Everything lives in the run's one workbook ({run}/KV_Extraction.xlsx, see Training/features.py):
+Everything lives in the run's tables ({run}/KV_Extraction/{Sheet}.csv, see Training/features.py):
 a review is written onto the field sheet's own rows, so extraction and review travel together.
 
     candidate rows   the reviewer's verdict on each key-value pair the run extracted:
@@ -34,28 +34,31 @@ their own reasons (noise / not a heading); a correct heading and an added one ca
 (Heading / Subheading). Headings are scored separately (evaluate_headings: line-level precision /
 recall, level accuracy and pages exactly right) and are not part of the KV accuracy.
 
-The workbook is held in memory per run (RunStore) and written back a few seconds after the last
-change, atomically. If Excel has it open the write waits and retries (RunStore.error says so), and
-nothing is lost.
+The tables are held in memory per run (RunStore). A save rewrites only the CSV of the sheet it changed,
+a fraction of a second later, atomically, from a single writer thread. If another program has that file
+open the write waits and retries (RunStore.error says so), and nothing is lost while the backend runs.
 """
 
 from __future__ import annotations
 
 import atexit
 import hashlib
+import itertools
 import json
 import threading
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from Heading.extract import DETECTORS, LEVELS
 from Util import config
 from Util.geometry import Box, Word, union_boxes
-from Util.workbook import read_workbook, write_workbook
+from Util.tables import read_tables, table_path, tables_signature, write_table
 
 from .features import (
     COLUMNS,
@@ -128,15 +131,15 @@ def _truthy(value: Any) -> bool:
     return str(value) in {"1", "True", "true"}
 
 
-# ---------------------------------------------------------------- the run's workbook, in memory
+# ---------------------------------------------------------------- the run's tables, in memory
 
 
-def workbook_path(run_dir: Path) -> Path:
-    return Path(run_dir) / config.Workbook_Name
+def tables_dir(run_dir: Path) -> Path:
+    return Path(run_dir) / config.Tables_Folder
 
 
-def has_workbook(run_dir: Path) -> bool:
-    return workbook_path(run_dir).is_file()
+def has_tables(run_dir: Path) -> bool:
+    return table_path(tables_dir(run_dir), OVERALL_SHEET).is_file()
 
 
 def sheet_name(field: str) -> str:
@@ -144,57 +147,92 @@ def sheet_name(field: str) -> str:
 
 
 _SHEET_COLUMNS = {**{name: sheet_columns(False) for name in SHEETS.values()}, HEADING_SHEET: sheet_columns(True), OVERALL_SHEET: OVERALL_COLUMNS}
+_TABLE_NAMES = list(_SHEET_COLUMNS)
+
+
+def _split_key(pkey: str) -> tuple[str, str, str]:
+    """page_key() back into (record_id, page_number, file_name)."""
+    record_id, page_number, file_name = pkey.split("|", 2)
+    return record_id, page_number, file_name
 
 
 class RunStore:
-    """One run's workbook held in memory: sheets as frames of strings, written back shortly after a change."""
+    """One run's tables held in memory, built to answer a review click in milliseconds.
 
-    FLUSH_DELAY = 3.0
-    RETRY_DELAY = 5.0
+    What a run extracted never changes when it is reviewed, so it is read and indexed once when the run
+    is loaded: `base` (a frame of strings per sheet, one row per candidate, with the reviewer's columns),
+    an index of each page's rows, and, lazily, what the run extracted per page-field. A review only edits
+    the review columns of its own rows (in place), adds or removes its own rows in `added` (the
+    reviewer's selected words, kept apart so `base` never changes shape), and recomputes the one label
+    and the one score contribution it touches. Nothing else is rebuilt.
+
+    A change marks the sheet it touched, and ONE background writer thread rewrites just that sheet's
+    CSV a fraction of a second later (atomically). One writer means two writes can never collide on a
+    file, and rewriting one sheet keeps the write small however big the run is.
+    """
+
+    COALESCE = 0.2  # seconds a burst of changes gets to finish before the writer starts
+    RETRY_DELAY = 3.0
     _stores: dict[str, "RunStore"] = {}
     _guard = threading.Lock()
 
     def __init__(self, run_dir: Path):
         self.run_dir = Path(run_dir)
-        self.path = workbook_path(run_dir)
+        self.dir = tables_dir(run_dir)
         self.lock = threading.RLock()
-        self.sheets: dict[str, pd.DataFrame] = {}
-        self.loaded_mtime = 0.0
-        self.version = 0
-        self.dirty = False
+        self.loaded = False
+        self.loaded_sig: tuple | None = None
+        self.version = 0  # bumps on every change and every (re)load
         self.error = ""
-        self._timer: threading.Timer | None = None
-        self._labels: tuple[int, dict[str, Any]] | None = None
-        self._log: tuple[int, pd.DataFrame] | None = None
+        self.overall = pd.DataFrame(columns=OVERALL_COLUMNS)
+        self.base: dict[str, pd.DataFrame] = {}
+        self.added: dict[str, pd.DataFrame] = {}
+        self._pos: dict[str, dict] = {}
+        self._labels_pages: dict[str, dict[str, Any]] = {}
+        self._found: dict[tuple, dict[str, Any] | None] = {}
+        self._score_cache: dict[tuple, tuple] = {}
+        self._log: pd.DataFrame | None = None
+        self._rev = itertools.count(1)
+        self._sheet_version = dict.fromkeys(_TABLE_NAMES, 0)
+        self._dirty: set[str] = set()
+        self._wake = threading.Event()
+        self._writer: threading.Thread | None = None
+
+    @property
+    def dirty(self) -> bool:
+        """Changes not yet in the files (being written counts as not yet)."""
+        return bool(self._dirty)
 
     @classmethod
     def get(cls, run_dir: Path) -> "RunStore | None":
-        """The run's store, or None when the run has no workbook (a run from an older layout)."""
+        """The run's store, or None when the run has no tables (a run from an older layout)."""
         key = str(Path(run_dir).resolve())
         with cls._guard:
             store = cls._stores.get(key)
             if store is None:
                 store = cls._stores[key] = RunStore(run_dir)
         store._refresh()
-        return store if store.sheets else None
+        return store if store.loaded else None
 
     @classmethod
-    def flush_all(cls) -> None:
+    def flush_all(cls, timeout: float = 30.0) -> None:
+        deadline = time.monotonic() + timeout
         for store in list(cls._stores.values()):
-            store.flush()
+            store.flush(max(0.0, deadline - time.monotonic()))
+
+    # ---- loading
 
     def _refresh(self) -> None:
         with self.lock:
-            if self.dirty:
+            if self._dirty:
                 return
-            try:
-                mtime = self.path.stat().st_mtime
-            except OSError:
-                self.sheets = {}
+            sig = tables_signature(self.dir, _TABLE_NAMES)
+            if all(item is None for item in sig):
+                self.loaded = False
                 return
-            if self.sheets and mtime == self.loaded_mtime:
+            if self.loaded and sig == self.loaded_sig:
                 return
-            sheets = read_workbook(self.path)
+            sheets = read_tables(self.dir, _TABLE_NAMES)
             for name, columns in _SHEET_COLUMNS.items():
                 frame = sheets.get(name)
                 if frame is None:
@@ -203,71 +241,239 @@ class RunStore:
                     if column not in frame.columns:
                         frame[column] = ""
                 sheets[name] = frame
-            self.sheets = sheets
-            self.loaded_mtime = mtime
+            self._load(sheets)
+            self.loaded_sig = sig
+            self.loaded = True
             self.version += 1
 
-    # ---- what the rest of the code reads
+    def _load(self, sheets: dict[str, pd.DataFrame]) -> None:
+        self.overall = sheets[OVERALL_SHEET]
+        self.base, self.added, self._pos = {}, {}, {}
+        for name in _TABLE_NAMES:
+            if name == OVERALL_SHEET:
+                continue
+            frame = sheets[name]
+            is_review = (frame["source"] == REVIEW_SOURCE).to_numpy()
+            base = frame[~is_review].reset_index(drop=True)
+            self.base[name] = base
+            self.added[name] = frame[is_review].reset_index(drop=True)
+            self._pos[name] = base.groupby(["record_id", "page_number", "file_name"], sort=False).indices
+        self._found, self._score_cache, self._log = {}, {}, None
+        self._labels_pages = {}
+        for field in FIELDS:
+            name, base = sheet_name(field), None
+            base = self.base[name]
+            stamped = np.flatnonzero((base["reviewed_at"] != "").to_numpy())
+            if not len(stamped):
+                continue
+            columns = ["record_id", "page_number", "file_name"] + (["field"] if field in HEADING_FIELDS else [])
+            keys = base.iloc[stamped][columns].drop_duplicates()
+            for values in keys.itertuples(index=False, name=None):
+                if field in HEADING_FIELDS and values[3] != field:
+                    continue
+                self._set_label(name, field, tuple(values[:3]))
+
+    # ---- what the rest of the code reads (callers hold no lock; each method takes it)
 
     def log(self) -> pd.DataFrame:
         """Every candidate of the run in the candidate-log columns (the reviewer's own rows left out)."""
         with self.lock:
-            if self._log is None or self._log[0] != self.version:
-                frames = [sheet_to_log(self.sheets[SHEETS[field]], field) for field in KV_FIELDS]
-                heading = self.sheets[HEADING_SHEET]
+            if self._log is None:
+                frames = [sheet_to_log(self.base[SHEETS[field]], field) for field in KV_FIELDS]
+                heading = self.base[HEADING_SHEET]
                 for field in HEADING_FIELDS:
                     frames.append(sheet_to_log(heading[heading["field"] == field], field))
                 frames = [frame for frame in frames if not frame.empty]
-                self._log = (self.version, pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=COLUMNS))
-            return self._log[1]
+                self._log = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=COLUMNS)
+            return self._log
 
     def records(self) -> list[str]:
-        """Record ids in the run, in workbook order."""
+        """Record ids in the run, in file order."""
         with self.lock:
-            return list(dict.fromkeys(self.sheets[OVERALL_SHEET]["RecordId"]))
+            return list(dict.fromkeys(self.overall["RecordId"]))
+
+    def pages(self) -> list[dict[str, str]]:
+        """Every page of the run, in file order."""
+        with self.lock:
+            return [
+                {"record_id": r, "page_number": n, "file_name": f}
+                for r, n, f in zip(self.overall["RecordId"], self.overall["PageNumber"], self.overall["FileName"])
+            ]
 
     def labels(self) -> dict[str, Any]:
+        """{"pages": {page key: {record_id, page_number, file_name, ocr_sha1, fields: {field: label}}}}.
+        Read-only for callers: it is the store's own structure."""
+        return {"pages": self._labels_pages}
+
+    @property
+    def sheets(self) -> dict[str, pd.DataFrame]:
+        """Every sheet as written to disk (the reviewer's rows after the candidates)."""
         with self.lock:
-            if self._labels is None or self._labels[0] != self.version:
-                self._labels = (self.version, _labels_from_sheets(self.sheets))
-            return self._labels[1]
+            return {OVERALL_SHEET: self.overall, **{name: self._snapshot(name) for name in self.base}}
+
+    def _snapshot(self, name: str) -> pd.DataFrame:
+        with self.lock:
+            add = self.added[name]
+            return pd.concat([self.base[name], add], ignore_index=True) if len(add) else self.base[name].copy()
+
+    def page_field_rows(self, name: str, field: str, key: tuple) -> pd.DataFrame:
+        """The candidate rows of one page-field (extraction rows only)."""
+        base = self.base[name]
+        pos = self._pos[name].get(key)
+        if pos is None:
+            return base.iloc[0:0]
+        rows = base.iloc[pos]
+        return rows[rows["field"] == field] if field in HEADING_FIELDS else rows
+
+    def _rows_for(self, name: str, field: str, key: tuple) -> pd.DataFrame:
+        """A page-field's rows with the reviewer's own rows after them (what a label is built from)."""
+        rows = self.page_field_rows(name, field, key)
+        add = self.added[name]
+        if len(add):
+            mask = (add["record_id"] == key[0]) & (add["page_number"] == key[1]) & (add["file_name"] == key[2])
+            if field in HEADING_FIELDS:
+                mask &= add["field"] == field
+            extra = add[mask]
+            if len(extra):
+                rows = pd.concat([rows, extra])
+        return rows
+
+    def _set_label(self, name: str, field: str, key: tuple) -> None:
+        """Recompute one page-field's label from its rows (or drop it when it is not reviewed)."""
+        rows = self._rows_for(name, field, key)
+        label = _label_from_rows(rows, field in HEADING_FIELDS) if len(rows) else None
+        pkey = page_key(*key)
+        entry = self._labels_pages.get(pkey)
+        if label is None:
+            if entry is not None:
+                entry["fields"].pop(field, None)
+                if not entry["fields"]:
+                    del self._labels_pages[pkey]
+            return
+        label["rev"] = next(self._rev)
+        if entry is None:
+            entry = self._labels_pages[pkey] = {
+                "record_id": key[0], "page_number": key[1], "file_name": key[2], "fields": {}, "ocr_sha1": "",
+            }
+        entry["ocr_sha1"] = entry["ocr_sha1"] or next((value for value in rows["ocr_sha1"] if value), "")
+        entry["fields"][field] = label
+
+    def found(self, field: str, key: tuple) -> dict[str, Any] | None:
+        """What the run extracted for one page-field, or None if the run has no rows for it: the pairs a
+        key-value review judges, or the selected headings with their levels. Reviews do not change it."""
+        with self.lock:
+            cache_key = (field, key)
+            if cache_key in self._found:
+                return self._found[cache_key]
+            rows = self.page_field_rows(sheet_name(field), field, key)
+            info = None
+            if len(rows):
+                log = sheet_to_log(rows, field)
+                info = {"ocr_sha1": log["ocr_sha1"].iloc[0], "found": [], "norms": Counter(), "levels": {}}
+                for row in log.to_dict("records"):
+                    if field in HEADING_FIELDS:
+                        if _run_selected(row) and row["value_norm"]:
+                            info["norms"][row["value_norm"]] += 1
+                            info["levels"].setdefault(row["value_norm"], run_level(row))
+                    elif str(row["is_placeholder"]) != "1" and row["value_norm"] and (_run_accepted(row) or _run_selected(row)):
+                        info["found"].append(
+                            {
+                                "candidate_id": row["candidate_id"],
+                                "value": row["value"],
+                                "value_norm": row["value_norm"],
+                                "key_text": row["key_text"],
+                                "region": row["region"],
+                                "key_words": _ints(row["key_words"]),
+                                "value_words": _ints(row["value_words"]),
+                            }
+                        )
+            self._found[cache_key] = info
+            return info
+
+    def score_of(self, kind: str, pkey: str, field: str, label: dict[str, Any]):
+        """One reviewed page-field's contribution to this run's score (cached until its label changes).
+        kind "kv": a Counter of right / wrong / missed / page_fields; "heading": tp / fp / fn / ... counts."""
+        with self.lock:
+            token = (label.get("run"), label.get("rev"))
+            cached = self._score_cache.get((kind, pkey, field))
+            if cached is not None and cached[0] == token:
+                return cached[1]
+            info = self.found(field, _split_key(pkey))
+            out = None
+            if info is not None and _same_ocr(label, info["ocr_sha1"]):
+                if kind == "kv":
+                    out = score_pairs(info["found"], label)
+                    out["page_fields"] += 1
+                else:
+                    truth = Counter(item["value_norm"] for item in label.get("truth") or [] if item.get("value_norm"))
+                    levels: dict[str, str] = {}
+                    for item in label.get("truth") or []:
+                        levels.setdefault(item.get("value_norm", ""), item.get("level", ""))
+                    matched = info["norms"] & truth
+                    tp = sum(matched.values())
+                    out = {
+                        "tp": tp,
+                        "fp": sum(info["norms"].values()) - tp,
+                        "fn": sum(truth.values()) - tp,
+                        "level_ok": sum(n for norm, n in matched.items() if info["levels"].get(norm) == levels.get(norm)),
+                        "pages": 1,
+                        "pages_exact": int(info["norms"] == truth),
+                    }
+            self._score_cache[(kind, pkey, field)] = (token, out)
+            return out
 
     # ---- changes
 
-    def changed(self) -> None:
+    def changed(self, *names: str) -> None:
+        """The named sheets changed: the writer saves them shortly."""
         with self.lock:
             self.version += 1
-            self.dirty = True
-            self._schedule(self.FLUSH_DELAY)
+            for name in names:
+                self._sheet_version[name] += 1
+                self._dirty.add(name)
+            if self._writer is None or not self._writer.is_alive():
+                self._writer = threading.Thread(target=self._write_loop, name=f"tables-{self.run_dir.name}", daemon=True)
+                self._writer.start()
+            self._wake.set()
 
-    def _schedule(self, delay: float) -> None:
-        if self._timer is not None:
-            self._timer.cancel()
-        self._timer = threading.Timer(delay, self.flush)
-        self._timer.daemon = True
-        self._timer.start()
-
-    def flush(self) -> None:
-        with self.lock:
-            if not self.dirty:
-                return
-            snapshot = {name: frame.copy() for name, frame in self.sheets.items()}
-            version = self.version
-        try:
-            write_workbook(self.path, snapshot)
-            mtime = self.path.stat().st_mtime
-        except OSError as exc:
+    def _write_loop(self) -> None:
+        while True:
+            self._wake.wait()
+            time.sleep(self.COALESCE)
+            self._wake.clear()
             with self.lock:
-                self.error = f"{self.path.name} could not be saved ({exc}). Close it in Excel; the reviews are kept and saved when it is free."
-                self._schedule(self.RETRY_DELAY)
-            return
-        with self.lock:
-            self.loaded_mtime = mtime
-            self.error = ""
-            if self.version == version:
-                self.dirty = False
-            else:
-                self._schedule(self.FLUSH_DELAY)
+                batch = {name: (self._sheet_version[name], self._snapshot(name)) for name in sorted(self._dirty)}
+            failed = False
+            for name, (version, frame) in batch.items():
+                try:
+                    write_table(self.dir, name, frame)
+                except OSError as exc:
+                    with self.lock:
+                        self.error = (
+                            f"{name}.csv could not be saved ({exc}). Close it if another program has it "
+                            "open; the reviews are kept in memory and saved as soon as it is free."
+                        )
+                    failed = True
+                    break
+                with self.lock:
+                    if self._sheet_version[name] == version:
+                        self._dirty.discard(name)
+                    self.loaded_sig = tables_signature(self.dir, _TABLE_NAMES)
+            if failed:
+                time.sleep(self.RETRY_DELAY)
+                self._wake.set()
+                continue
+            with self.lock:
+                self.error = ""
+                if self._dirty:
+                    self._wake.set()
+
+    def flush(self, timeout: float = 60.0) -> bool:
+        """Wait until every change is in the files; False if that did not happen within the timeout."""
+        deadline = time.monotonic() + timeout
+        while self._dirty and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not self._dirty
 
 
 atexit.register(RunStore.flush_all)
@@ -282,8 +488,8 @@ def store_status(run_dir: Path) -> dict[str, Any]:
 
 
 def candidate_logs(run_dir: Path) -> list[Path]:
-    """The files holding the run's candidates: the workbook (a run from an older layout has none)."""
-    return [workbook_path(run_dir)] if has_workbook(run_dir) else []
+    """The folder holding the run's candidates (a run from an older layout has none)."""
+    return [tables_dir(run_dir)] if has_tables(run_dir) else []
 
 
 def run_log(run_dir: Path) -> pd.DataFrame:
@@ -291,9 +497,9 @@ def run_log(run_dir: Path) -> pd.DataFrame:
     return store.log() if store else pd.DataFrame(columns=COLUMNS)
 
 
-def record_log(run_dir: Path, record_id: str) -> pd.DataFrame:
-    frame = run_log(run_dir)
-    return frame[frame["record_id"] == record_id]
+def run_pages(run_dir: Path) -> list[dict[str, str]]:
+    store = RunStore.get(run_dir)
+    return store.pages() if store else []
 
 
 def _box(row: dict[str, Any], prefix: str) -> list[float] | None:
@@ -304,37 +510,41 @@ def _box(row: dict[str, Any], prefix: str) -> list[float] | None:
 
 
 def page_candidates(run_dir: Path, record_id: str, page_number: str, file_name: str) -> dict[str, dict[str, Any]]:
-    """field -> {ocr_sha1, candidates: [...]} for one page, from the run's workbook."""
-    frame = record_log(run_dir, record_id)
-    page = frame[(frame["page_number"] == str(page_number)) & (frame["file_name"] == file_name)]
+    """field -> {ocr_sha1, candidates: [...]} for one page, from the run's tables."""
     out: dict[str, dict[str, Any]] = {field: {"ocr_sha1": "", "candidates": []} for field in FIELDS}
-    for row in page.to_dict("records"):
-        field = row["field"]
-        if field not in out:
-            continue
-        out[field]["ocr_sha1"] = row["ocr_sha1"]
-        if str(row["is_placeholder"]) == "1":
-            continue
-        out[field]["candidates"].append(
-            {
-                "candidate_id": row["candidate_id"],
-                "key": row["key"],
-                "key_text": row["key_text"],
-                "region": row["region"],
-                "source": row["rule_source"],
-                "score": row["rule_score"],
-                "accepted": _run_accepted(row),
-                "selected": _run_selected(row),
-                "note": row["rule_note"],
-                "value": row["value"],
-                "value_norm": row["value_norm"],
-                "detail": run_level(row),
-                "key_words": _ints(row["key_words"]),
-                "value_words": _ints(row["value_words"]),
-                "key_box": _box(row, "key"),
-                "value_box": _box(row, "value"),
-            }
-        )
+    store = RunStore.get(run_dir)
+    if store is None:
+        return out
+    key = (record_id, str(page_number), file_name)
+    with store.lock:
+        for field in FIELDS:
+            rows = store.page_field_rows(sheet_name(field), field, key)
+            if not len(rows):
+                continue
+            for row in sheet_to_log(rows, field).to_dict("records"):
+                out[field]["ocr_sha1"] = row["ocr_sha1"]
+                if str(row["is_placeholder"]) == "1":
+                    continue
+                out[field]["candidates"].append(
+                    {
+                        "candidate_id": row["candidate_id"],
+                        "key": row["key"],
+                        "key_text": row["key_text"],
+                        "region": row["region"],
+                        "source": row["rule_source"],
+                        "score": row["rule_score"],
+                        "accepted": _run_accepted(row),
+                        "selected": _run_selected(row),
+                        "note": row["rule_note"],
+                        "value": row["value"],
+                        "value_norm": row["value_norm"],
+                        "detail": run_level(row),
+                        "key_words": _ints(row["key_words"]),
+                        "value_words": _ints(row["value_words"]),
+                        "key_box": _box(row, "key"),
+                        "value_box": _box(row, "value"),
+                    }
+                )
     # A field the run did not log (headings in a run made without them) still belongs to this OCR.
     page_hash = next((slot["ocr_sha1"] for slot in out.values() if slot["ocr_sha1"]), "")
     for slot in out.values():
@@ -461,7 +671,7 @@ def pair_accuracy(score: Counter) -> float | None:
 
 
 def _label_from_rows(rows: pd.DataFrame, heading: bool) -> dict[str, Any] | None:
-    """One page-field's label rebuilt from its workbook rows, or None when it was never reviewed."""
+    """One page-field's label rebuilt from its table rows, or None when it was never reviewed."""
     stamped = rows[rows["reviewed_at"] != ""]
     if stamped.empty:
         return None
@@ -528,31 +738,6 @@ def _label_from_rows(rows: pd.DataFrame, heading: bool) -> dict[str, Any] | None
         "reviewer": stamped["reviewer"].iloc[0],
         "reviewed_at": max(stamped["reviewed_at"]),
     }
-
-
-def _labels_from_sheets(sheets: dict[str, pd.DataFrame]) -> dict[str, Any]:
-    pages: dict[str, dict[str, Any]] = {}
-    for field in FIELDS:
-        heading = field in HEADING_FIELDS
-        sheet = sheets[sheet_name(field)]
-        if heading:
-            sheet = sheet[sheet["field"] == field]
-        reviewed = sheet[sheet["reviewed_at"] != ""]
-        if reviewed.empty:
-            continue
-        keys = reviewed[["record_id", "page_number", "file_name"]].drop_duplicates().itertuples(index=False, name=None)
-        for record_id, page_number, file_name in keys:
-            rows = sheet[(sheet["record_id"] == record_id) & (sheet["page_number"] == page_number) & (sheet["file_name"] == file_name)]
-            label = _label_from_rows(rows, heading)
-            if label is None:
-                continue
-            key = page_key(record_id, page_number, file_name)
-            entry = pages.setdefault(
-                key, {"record_id": record_id, "page_number": page_number, "file_name": file_name, "fields": {}, "ocr_sha1": ""}
-            )
-            entry["ocr_sha1"] = entry["ocr_sha1"] or next((value for value in rows["ocr_sha1"] if value), "")
-            entry["fields"][field] = label
-    return {"pages": pages}
 
 
 def load_labels(run_dir: Path) -> dict[str, Any]:
@@ -754,11 +939,25 @@ def _review_rows(
     return pd.DataFrame(rows, columns=sheet.columns)
 
 
-def _page_mask(sheet: pd.DataFrame, field: str, record_id: str, page_number: str, file_name: str) -> pd.Series:
-    mask = (sheet["record_id"] == record_id) & (sheet["page_number"] == str(page_number)) & (sheet["file_name"] == file_name)
+def _page_field_positions(store: RunStore, name: str, field: str, key: tuple) -> np.ndarray:
+    base = store.base[name]
+    pos = store._pos[name].get(key)
+    if pos is None:
+        return np.array([], dtype=int)
     if field in HEADING_FIELDS:
-        mask &= sheet["field"] == field
-    return mask
+        pos = pos[base["field"].to_numpy()[pos] == field]
+    return pos
+
+
+def _drop_review_rows(store: RunStore, name: str, field: str, key: tuple) -> None:
+    add = store.added[name]
+    if not len(add):
+        return
+    mask = (add["record_id"] == key[0]) & (add["page_number"] == key[1]) & (add["file_name"] == key[2])
+    if field in HEADING_FIELDS:
+        mask &= add["field"] == field
+    if mask.any():
+        store.added[name] = add[~mask].reset_index(drop=True)
 
 
 def save_field_review(
@@ -772,7 +971,7 @@ def save_field_review(
 ) -> dict[str, Any]:
     store = RunStore.get(run_dir)
     if store is None:
-        raise ValueError(f"{Path(run_dir).name} has no {config.Workbook_Name}; rerun it to review.")
+        raise ValueError(f"{Path(run_dir).name} has no {config.Tables_Folder} tables; rerun it to review.")
     found = page_candidates(run_dir, record_id, page_number, file_name)
     if field not in found:
         raise ValueError(f"Unknown field: {field}")
@@ -784,30 +983,33 @@ def save_field_review(
 
     with store.lock:
         name = sheet_name(field)
-        sheet = store.sheets[name]
-        mask = _page_mask(sheet, field, record_id, page_number, file_name)
-        if not mask.any():
+        key = (record_id, str(page_number), file_name)
+        pos = _page_field_positions(store, name, field, key)
+        if not len(pos):
             raise ValueError(f"The run logged no {FIELDS[field]} rows for {record_id} page {page_number}.")
+        base = store.base[name]
         # A review replaces the page-field's earlier one: drop its review rows, reset its verdicts.
-        sheet = sheet[~(mask & (sheet["source"] == REVIEW_SOURCE))].reset_index(drop=True)
-        mask = _page_mask(sheet, field, record_id, page_number, file_name)
-        for column in REVIEW_COLUMNS:
-            sheet.loc[mask, column] = ""
+        _drop_review_rows(store, name, field, key)
+        column = {c: base.columns.get_loc(c) for c in REVIEW_COLUMNS}
+        for c in REVIEW_COLUMNS:
+            base.iloc[pos, column[c]] = ""
+        candidate_ids = base["candidate_id"].to_numpy()[pos]
         for cid, verdict in label["candidates"].items():
-            rows = mask & (sheet["candidate_id"] == cid)
-            sheet.loc[rows, "accuracy"] = "right" if verdict["verdict"] == "correct" else "wrong"
-            sheet.loc[rows, "review_reason"] = verdict["reason"]
-            sheet.loc[rows, "belongs_to"] = verdict["belongs_to"]
-            sheet.loc[rows, "review_level"] = verdict["level"]
-        sheet.loc[mask, "reviewer"] = label["reviewer"]
-        sheet.loc[mask, "reviewed_at"] = label["reviewed_at"]
-        added = _review_rows(field, label, sheet, sheet[mask], by_index, page_w, page_h)
+            rows = pos[candidate_ids == cid]
+            if len(rows):
+                base.iloc[rows, column["accuracy"]] = "right" if verdict["verdict"] == "correct" else "wrong"
+                base.iloc[rows, column["review_reason"]] = verdict["reason"]
+                base.iloc[rows, column["belongs_to"]] = verdict["belongs_to"]
+                base.iloc[rows, column["review_level"]] = verdict["level"]
+        base.iloc[pos, column["reviewer"]] = label["reviewer"]
+        base.iloc[pos, column["reviewed_at"]] = label["reviewed_at"]
+        added = _review_rows(field, label, base, base.iloc[pos], by_index, page_w, page_h)
         if not added.empty:
             added["reviewer"] = label["reviewer"]
             added["reviewed_at"] = label["reviewed_at"]
-            sheet = pd.concat([sheet, added], ignore_index=True)
-        store.sheets[name] = sheet
-        store.changed()
+            store.added[name] = pd.concat([store.added[name], added], ignore_index=True)
+        store._set_label(name, field, key)
+        store.changed(name)
     return label
 
 
@@ -817,23 +1019,34 @@ def clear_field_review(run_dir: Path, record_id: str, page_number: str, file_nam
         return
     with store.lock:
         name = sheet_name(field)
-        sheet = store.sheets[name]
-        mask = _page_mask(sheet, field, record_id, page_number, file_name)
-        if not (mask & (sheet["reviewed_at"] != "")).any():
+        key = (record_id, str(page_number), file_name)
+        pos = _page_field_positions(store, name, field, key)
+        if not len(pos):
             return
-        sheet = sheet[~(mask & (sheet["source"] == REVIEW_SOURCE))].reset_index(drop=True)
-        mask = _page_mask(sheet, field, record_id, page_number, file_name)
-        for column in REVIEW_COLUMNS:
-            sheet.loc[mask, column] = ""
-        store.sheets[name] = sheet
-        store.changed()
+        base = store.base[name]
+        if not (base["reviewed_at"].to_numpy()[pos] != "").any():
+            return
+        _drop_review_rows(store, name, field, key)
+        for c in REVIEW_COLUMNS:
+            base.iloc[pos, base.columns.get_loc(c)] = ""
+        store._set_label(name, field, key)
+        store.changed(name)
 
 
 # ---------------------------------------------------------------- pooled labels and accuracy
 
 
+_POOLED: dict[str, Any] = {"sig": None, "value": {}}
+_POOLED_LOCK = threading.Lock()
+
+
 def pooled_labels(run_dirs: list[Path]) -> dict[tuple[str, str], dict[str, Any]]:
-    """(page key, field) -> latest label across runs, with the page's ocr_sha1."""
+    """(page key, field) -> latest label across runs, with the page's ocr_sha1. Cached until any run's
+    reviews change, so repeated calls within a request cost nothing."""
+    signature = labels_signature(run_dirs)
+    with _POOLED_LOCK:
+        if _POOLED["sig"] == signature:
+            return _POOLED["value"]
     pooled: dict[tuple[str, str], dict[str, Any]] = {}
     for run_dir in run_dirs:
         store = RunStore.get(run_dir)
@@ -844,6 +1057,8 @@ def pooled_labels(run_dirs: list[Path]) -> dict[tuple[str, str], dict[str, Any]]
                 current = pooled.get((key, field))
                 if current is None or label.get("reviewed_at", "") > current.get("reviewed_at", ""):
                     pooled[(key, field)] = {**label, "ocr_sha1": entry.get("ocr_sha1", ""), "run": Path(run_dir).name}
+    with _POOLED_LOCK:
+        _POOLED["sig"], _POOLED["value"] = signature, pooled
     return pooled
 
 
@@ -885,10 +1100,28 @@ def _pair_totals(score: Counter) -> dict[str, Any]:
 def evaluate(run_dir: Path, pooled: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
     """KV key-value pair accuracy of a run over every page-field that has a matching label:
     correct = right pairs, total = right + wrong + missed."""
-    return evaluate_log(run_log(run_dir), pooled)
+    per_field: dict[str, Counter] = {field: Counter() for field in KV_FIELDS}
+    store = RunStore.get(run_dir)
+    if store is not None:
+        for (pkey, field), label in pooled.items():
+            if field in per_field:
+                contribution = store.score_of("kv", pkey, field, label)
+                if contribution is not None:
+                    per_field[field].update(contribution)
+    return _kv_result(per_field)
+
+
+def _kv_result(per_field: dict[str, Counter]) -> dict[str, Any]:
+    overall: Counter = sum(per_field.values(), Counter())
+    return {
+        **_pair_totals(overall),
+        "page_fields": overall["page_fields"],
+        "fields": {field: {**_pair_totals(score), "page_fields": score["page_fields"]} for field, score in per_field.items()},
+    }
 
 
 def evaluate_log(frame: pd.DataFrame, pooled: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+    """The same score for a candidate log held in memory (rules_check re-extracts without a run)."""
     per_field: dict[str, Counter] = {field: Counter() for field in KV_FIELDS}
     for key, extracted in extracted_pairs(frame).items():
         label = pooled.get(key)
@@ -897,12 +1130,7 @@ def evaluate_log(frame: pd.DataFrame, pooled: dict[tuple[str, str], dict[str, An
             continue
         per_field[field].update(score_pairs(extracted["found"], label))
         per_field[field]["page_fields"] += 1
-    overall: Counter = sum(per_field.values(), Counter())
-    return {
-        **_pair_totals(overall),
-        "page_fields": overall["page_fields"],
-        "fields": {field: {**_pair_totals(score), "page_fields": score["page_fields"]} for field, score in per_field.items()},
-    }
+    return _kv_result(per_field)
 
 
 def _pct(part: int, whole: int) -> float | None:
@@ -915,34 +1143,15 @@ def evaluate_headings(run_dir: Path, pooled: dict[tuple[str, str], dict[str, Any
     A selected heading is a true positive when a true heading on the page has the same text
     (normalized); its level is right when the reviewed level matches the predicted one.
     """
-    frame = run_log(run_dir)
-    frame = frame[frame["field"].isin(list(HEADING_FIELDS))]
-    selected: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in frame.to_dict("records"):
-        key = (page_key(row["record_id"], row["page_number"], row["file_name"]), row["field"])
-        slot = selected.setdefault(key, {"ocr_sha1": row["ocr_sha1"], "norms": Counter(), "levels": {}})
-        if _run_selected(row) and row["value_norm"]:
-            slot["norms"][row["value_norm"]] += 1
-            slot["levels"].setdefault(row["value_norm"], run_level(row))
-
     out = {field: {"tp": 0, "fp": 0, "fn": 0, "level_ok": 0, "pages": 0, "pages_exact": 0} for field in HEADING_FIELDS}
-    for key, slot in selected.items():
-        label = pooled.get(key)
-        if label is None or not _same_ocr(label, slot["ocr_sha1"]):
-            continue
-        truth = Counter(item["value_norm"] for item in label.get("truth") or [] if item.get("value_norm"))
-        levels: dict[str, str] = {}
-        for item in label.get("truth") or []:
-            levels.setdefault(item.get("value_norm", ""), item.get("level", ""))
-        matched = slot["norms"] & truth
-        tp = sum(matched.values())
-        score = out[key[1]]
-        score["tp"] += tp
-        score["fp"] += sum(slot["norms"].values()) - tp
-        score["fn"] += sum(truth.values()) - tp
-        score["level_ok"] += sum(n for norm, n in matched.items() if slot["levels"].get(norm) == levels.get(norm))
-        score["pages"] += 1
-        score["pages_exact"] += int(slot["norms"] == truth)
+    store = RunStore.get(run_dir)
+    if store is not None:
+        for (pkey, field), label in pooled.items():
+            if field in out:
+                contribution = store.score_of("heading", pkey, field, label)
+                if contribution is not None:
+                    for name, value in contribution.items():
+                        out[field][name] += value
     for score in out.values():
         score["precision"] = _pct(score["tp"], score["tp"] + score["fp"])
         score["recall"] = _pct(score["tp"], score["tp"] + score["fn"])
@@ -1003,15 +1212,12 @@ def reviewed_fields(run_dir: Path, pooled: dict[tuple[str, str], dict[str, Any]]
     fields: dict[str, set[str]] = {}
     for key, entry in load_labels(run_dir)["pages"].items():
         fields[key] = set(entry["fields"])
-    if pooled:
-        frame = run_log(run_dir)
-        if not frame.empty:
-            pages = frame[["record_id", "page_number", "file_name", "field", "ocr_sha1"]].drop_duplicates()
-            for row in pages.to_dict("records"):
-                key = page_key(row["record_id"], row["page_number"], row["file_name"])
-                label = pooled.get((key, row["field"]))
-                if label is not None and _same_ocr(label, row["ocr_sha1"]):
-                    fields.setdefault(key, set()).add(row["field"])
+    store = RunStore.get(run_dir)
+    if pooled and store is not None:
+        for (pkey, field), label in pooled.items():
+            info = store.found(field, _split_key(pkey))
+            if info is not None and _same_ocr(label, info["ocr_sha1"]):
+                fields.setdefault(pkey, set()).add(field)
     return {key: len(names) for key, names in fields.items()}
 
 

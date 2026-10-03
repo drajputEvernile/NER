@@ -1,4 +1,4 @@
-"""Run both extraction models on every document into one Excel workbook, with a resumable queue.
+"""Run both extraction models on every document into one folder of CSV tables, with a resumable queue.
 
 The queue is built from the record folders under Raw_Input (each holding that record's page images);
 every one is looked up in OCR_Input, and the run starts on the records that have OCR JSON. A record
@@ -24,11 +24,11 @@ Queue file (active run):
 
 Output (everything a run saves; nothing else is written):
   {Run_Output}/KV_Run_{run_id}/run.json            (run summary, kept in sync with the queue)
-  {Run_Output}/KV_Run_{run_id}/KV_Extraction.xlsx  sheets Member_Name, Member_ID, Member_DOB,
+  {Run_Output}/KV_Run_{run_id}/KV_Extraction/  one CSV per sheet: Member_Name, Member_ID, Member_DOB,
       Provider_Name, E_Sign, DOS, Page_No, Headings (one row per candidate: what it is, the
       sentence it was read from with every word's position, its features) and Overall (the value
       selected for each field on each page). The Review UI writes the reviews into the same
-      workbook, and training reads it back: it is the only file that has to move between machines.
+      tables, and training reads them back: this folder is all that has to move between machines.
 
 -N / --max-pages  [M] N   and   -M / --min-pages M:
   -N N    = documents with N pages or fewer (0 = no upper limit, every document)
@@ -72,7 +72,7 @@ import pandas as pd
 from Util import config
 from Util.model import get_model
 from Util.model_setup import ensure_models
-from Util.workbook import read_workbook, write_workbook
+from Util.tables import read_tables, write_tables
 
 import pipeline
 from pipeline import FIELDS
@@ -94,13 +94,13 @@ logger = logging.getLogger(__name__)
 
 QUEUE_NAME = "kv_run_queue.json"
 # Queues written by an earlier layout of the outputs (per-field CSVs, overlays, candidate folders).
-QUEUE_VERSION = "workbook_v1"
-# The workbook is rewritten (all sheets, atomically) when this many seconds have passed since the
-# last write and when the run ends, so a long run does not rewrite it after every document. A
-# document counts as completed only once a written workbook holds it.
-CHECKPOINT_SECONDS = 60.0
+QUEUE_VERSION = "tables_v1"
+# The tables are rewritten (every sheet's CSV, atomically) when this many seconds have passed since
+# the last write and when the run ends, so a long run does not rewrite them after every document. A
+# document counts as completed only once written tables hold it.
+CHECKPOINT_SECONDS = 20.0
 
-# Sheet order of the workbook.
+# Sheet order of the tables.
 SHEET_ORDER = [*SHEETS.values(), HEADING_SHEET, OVERALL_SHEET]
 
 
@@ -172,9 +172,10 @@ def _source_records(run_name: str) -> list[str]:
     summary = _load_queue(folder / "run.json") or {}
     records = [doc["record_id"] for doc in summary.get("documents") or [] if doc.get("record_id")]
     if not records:
-        workbook = folder / config.Workbook_Name
-        if workbook.is_file():
-            records = sorted(set(read_workbook(workbook)[OVERALL_SHEET]["RecordId"]))
+        tables = folder / config.Tables_Folder
+        overall = read_tables(tables, [OVERALL_SHEET]).get(OVERALL_SHEET) if tables.is_dir() else None
+        if overall is not None:
+            records = sorted(set(overall["RecordId"]))
     if not records:
         raise SystemExit(f"--records-from: no documents found in {folder}")
     return records
@@ -243,7 +244,7 @@ def _new_queue(
         "max_pages": int(max_pages),
         "output_root": str(config.Run_Output),
         "run_folder": str(run_folder),
-        "workbook_path": str(run_folder / config.Workbook_Name),
+        "tables_path": str(run_folder / config.Tables_Folder),
         "model_version": model_version,
         "catalog_hash": catalog_hash(),
         "ner_model_name": ner_name if ner_ok else None,
@@ -282,7 +283,7 @@ def _new_queue(
     }
 
 
-# ---------------------------------------------------------------- the workbook
+# ---------------------------------------------------------------- the tables
 
 
 def _empty_sheets() -> dict[str, list[pd.DataFrame]]:
@@ -335,7 +336,7 @@ def _document_sheets(queue: dict[str, Any], result: pipeline.DocumentResult, mod
     return sheets
 
 
-def _workbook_frames(rows: dict[str, list[pd.DataFrame]]) -> dict[str, pd.DataFrame]:
+def _table_frames(rows: dict[str, list[pd.DataFrame]]) -> dict[str, pd.DataFrame]:
     columns = {
         **{SHEETS[spec.id]: sheet_columns(False) for spec in FIELDS},
         HEADING_SHEET: sheet_columns(True),
@@ -348,21 +349,21 @@ def _workbook_frames(rows: dict[str, list[pd.DataFrame]]) -> dict[str, pd.DataFr
     return frames
 
 
-def _write_workbook(queue: dict[str, Any], rows: dict[str, list[pd.DataFrame]]) -> Path:
-    path = write_workbook(Path(queue["workbook_path"]), _workbook_frames(rows))
-    logger.info("wrote workbook %s", path)
+def _write_tables(queue: dict[str, Any], rows: dict[str, list[pd.DataFrame]]) -> Path:
+    path = write_tables(Path(queue["tables_path"]), _table_frames(rows))
+    logger.info("wrote tables %s", path)
     return path
 
 
 def _resume_rows(queue: dict[str, Any]) -> dict[str, list[pd.DataFrame]]:
-    """The completed documents' rows from the workbook a stopped run left. A document the queue
+    """The completed documents' rows from the tables a stopped run left. A document the queue
     does not list as completed is dropped: its rows came from a write the queue never recorded."""
     rows = _empty_sheets()
-    path = Path(queue["workbook_path"])
-    if not path.is_file():
+    path = Path(queue["tables_path"])
+    if not path.is_dir():
         return rows
     done = {doc["record_id"] for doc in queue["documents"] if doc["status"] == "completed"}
-    sheets = read_workbook(path)
+    sheets = read_tables(path, SHEET_ORDER)
     for name in SHEET_ORDER:
         frame = sheets.get(name)
         if frame is None or frame.empty:
@@ -492,13 +493,13 @@ def run_all(
         raise SystemExit(f"Heading detector failed to load (remove it from config.Heading_Models to skip it): {failed}")
 
     by_id = {document.record_id: document for document in documents}
-    waiting: list[dict[str, Any]] = []  # extracted, not yet in a written workbook
+    waiting: list[dict[str, Any]] = []  # extracted, not yet in written tables
     last_write = time.monotonic()
 
     def checkpoint() -> Path:
-        """Write the workbook, then record every document it holds as completed."""
+        """Write the tables, then record every document they hold as completed."""
         nonlocal last_write
-        path = _write_workbook(queue, rows)
+        path = _write_tables(queue, rows)
         for meta in waiting:
             meta["status"] = "completed"
         waiting.clear()
@@ -534,7 +535,7 @@ def run_all(
             if waiting and time.monotonic() - last_write >= CHECKPOINT_SECONDS:
                 checkpoint()
 
-        workbook_path = checkpoint()
+        tables_path = checkpoint()
         all_ok = all(doc["status"] == "completed" for doc in queue["documents"])
         queue["status"] = "completed" if all_ok else "error"
         queue["end_time"] = _utc_now()
@@ -557,7 +558,7 @@ def run_all(
             "min_pages": queue.get("min_pages", 0),
             "max_pages": queue.get("max_pages", 0),
             "queue": str(queue_path),
-            "workbook": str(workbook_path),
+            "tables": str(tables_path),
             "completed_documents": queue["completed_documents"],
             "completed_pages": queue["completed_pages"],
             "records_without_ocr": [item["record_id"] for item in queue.get("no_ocr") or []],
@@ -572,14 +573,14 @@ def run_all(
         try:
             checkpoint()
         except Exception:  # noqa: BLE001
-            logger.exception("could not write partial workbook")
+            logger.exception("could not write partial tables")
         _save_queue(queue)
         logger.warning("stopped — resume with the same queue file")
         return 130
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run both extraction models on every document into one workbook.")
+    parser = argparse.ArgumentParser(description="Run both extraction models on every document into one folder of CSV tables.")
     parser.add_argument(
         "--fresh",
         action="store_true",

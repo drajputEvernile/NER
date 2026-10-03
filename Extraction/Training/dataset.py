@@ -1,5 +1,5 @@
 """Training data for the two ranking models (KV_Extraction and Heading_Detector): every run's
-candidates joined with its reviews, both read from the run's one workbook (KV_Extraction.xlsx).
+candidates joined with its reviews, both read from the run's tables (KV_Extraction/*.csv).
 
     python Training/dataset.py [RUN ...]      (default: every KV_Run_* under config.Run_Output)
 

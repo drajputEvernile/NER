@@ -76,9 +76,9 @@ export type DocumentRow = {
 export type RunDetail = RunSummary & {
   field_count: number;
   documents: DocumentRow[];
-  /** Reviews are written to the run's workbook a few seconds after the last change. */
+  /** Reviews are written to the run's tables a fraction of a second after each change. */
   saving: boolean;
-  /** Set when the workbook could not be written (open in Excel); the reviews are kept. */
+  /** Set when a table file could not be written (another program has it open); the reviews are kept. */
   save_error: string;
 };
 

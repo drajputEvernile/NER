@@ -1,30 +1,30 @@
-"""Check that the reviews are really saved in the run's Excel workbook, and back them up.
+"""Check that the reviews are really saved in the run's CSV tables, and back them up.
 
 Run it from the repo root with the repo venv (it only reads, and it is safe to run while the Review UI
 backend and frontend are running; do NOT stop them first):
 
-    .\\.venv\\Scripts\\python.exe check_review_workbook.pyw
-    .\\.venv\\Scripts\\python.exe check_review_workbook.pyw --expect-kv 522 --expect-headings 330 --expect-pages 54 --expect-docs 15
+    .\\.venv\\Scripts\\python.exe check_review_tables.pyw
+    .\\.venv\\Scripts\\python.exe check_review_tables.pyw --expect-kv 522 --expect-headings 330 --expect-pages 54 --expect-docs 15
 
 What it does, in this order, and what each part tells you:
 
-  1. FILES      the run's workbook, any leftover .tmp file and any Excel "~$" lock file: size, last write.
-  2. LOCKS      which programs hold the workbook / the .tmp file open right now (Windows Restart Manager),
-                and which process is the Review UI backend. This shows who causes "[WinError 32] ... in use".
-  3. DISK       how many reviews are actually inside the .xlsx file, per sheet, per document, and when the
+  1. FILES      the run's table files, and any leftover temp file: size, last write.
+  2. LOCKS      which programs hold the table files open right now (Windows Restart Manager), and which process
+                is the Review UI backend.
+  3. DISK       how many reviews are actually inside the CSV files, per sheet, per document, and when the
                 newest one was saved.
   4. BACKEND    asks the running backend (read-only) what it holds in memory: reviewed pages/documents, whether
-                it is still trying to save, and the error it is showing.
+                it is still saving, and the error it is showing.
   5. BACKUP     reads every review out of the backend's memory and writes review_backup_<run>_<time>.json
-                (read-only calls; this protects your work independently of Excel).
-  6. COMPARE    memory vs the file, field by field: anything that exists only in memory is NOT in the file.
-  7. SPEED      how long the workbook takes to read and write on this machine, whether a write + replace in the
+                (read-only calls; an independent copy of your reviews).
+  6. COMPARE    memory vs the files, field by field: anything that exists only in memory is NOT on disk.
+  7. SPEED      how long the tables take to read and write on this machine, whether a write + replace in the
                 run folder works at all, and how fast the backend answers.
   8. VERDICT    whether it is safe to close the backend.
 
 Everything is also written to review_check_report_<time>.txt. Send that text back.
 
-It never writes to the workbook. The only files it creates are the report, the backup, and two scratch files
+It never writes to the tables. The only files it creates are the report, the backup, and scratch files
 (__review_check_*) in the run folder that it removes again.
 
 With --restore backup.json --run KV_Run_x it re-applies a backup to a running backend (asks first).
@@ -61,7 +61,7 @@ FIELD_OF_SHEET = {
     "E_Sign": "electronic_signature", "DOS": "dos", "Page_No": "page_no", "Headings": "heading_heron",
 }
 SHEET_OF_FIELD = {field: sheet for sheet, field in FIELD_OF_SHEET.items()}
-WORKBOOK = "KV_Extraction.xlsx"
+TABLES = "KV_Extraction"
 SCRATCH = "__review_check_"
 
 REPORT: list[str] = []
@@ -206,20 +206,21 @@ class Api:
         return data
 
 
-# ---------------------------------------------------------------- reading the workbook
+# ---------------------------------------------------------------- reading the tables
 
 
-def read_copy(workbook: Path) -> tuple[dict, float, Path]:
-    """Copy the workbook aside (so the real file is open only for an instant) and read the copy."""
+def read_copy(tables: Path) -> tuple[dict, float, Path]:
+    """Copy the tables aside (so the real files are open only for an instant) and read the copies."""
     import pandas as pd
 
     scratch = Path(tempfile.mkdtemp(prefix="review_check_"))
-    copy = scratch / WORKBOOK
+    copy = scratch / TABLES
+    shutil.copytree(tables, copy, ignore=shutil.ignore_patterns("*.tmp"))
     started = time.perf_counter()
-    shutil.copy2(workbook, copy)
-    copy_seconds = time.perf_counter() - started
-    started = time.perf_counter()
-    sheets = pd.read_excel(copy, sheet_name=None, dtype=str, keep_default_na=False)
+    sheets = {
+        path.stem: pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+        for path in sorted(copy.glob("*.csv"))
+    }
     return sheets, time.perf_counter() - started, copy
 
 
@@ -267,28 +268,28 @@ def parse_stamp(text: str) -> float | None:
 # ---------------------------------------------------------------- the checks
 
 
-def check_files(run_dir: Path) -> tuple[Path, Path, Path]:
+def check_files(run_dir: Path) -> tuple[Path, list[Path]]:
     section("1. FILES in " + str(run_dir))
-    workbook, tmp = run_dir / WORKBOOK, run_dir / (WORKBOOK + ".tmp")
-    excel_lock = run_dir / ("~$" + WORKBOOK)
-    for path in sorted(run_dir.iterdir(), key=lambda item: item.name.lower()):
+    tables = run_dir / TABLES
+    listing = [*run_dir.glob("*"), *(tables.glob("*") if tables.is_dir() else [])]
+    for path in sorted(listing, key=lambda item: str(item).lower()):
         if path.is_file():
             stat = path.stat()
-            say(f"  {path.name:42s} {stat.st_size / 1e6:9.2f} MB   written {local_time(stat.st_mtime)} ({ago(stat.st_mtime)})")
+            say(f"  {str(path.relative_to(run_dir)):42s} {stat.st_size / 1e6:9.2f} MB   written {local_time(stat.st_mtime)} ({ago(stat.st_mtime)})")
     say()
-    say(f"  workbook exists: {workbook.is_file()}")
-    if tmp.exists():
-        stat = tmp.stat()
-        say(f"  LEFTOVER temp file: {tmp.name} ({stat.st_size / 1e6:.2f} MB, written {ago(stat.st_mtime)}). A save was started and did not finish.")
+    say(f"  tables folder exists: {tables.is_dir()}")
+    leftovers = sorted(tables.glob("*.tmp")) if tables.is_dir() else []
+    if leftovers:
+        for tmp in leftovers:
+            stat = tmp.stat()
+            say(f"  LEFTOVER temp file: {tmp.name} ({stat.st_size / 1e6:.2f} MB, written {ago(stat.st_mtime)}). A save was started and did not finish.")
     else:
-        say("  no leftover .tmp file")
-    if excel_lock.exists():
-        say(f"  EXCEL has the workbook open: {excel_lock.name} exists (Excel keeps this file while a workbook is open).")
-    return workbook, tmp, excel_lock
+        say("  no leftover temp files")
+    return tables, leftovers
 
 
 def check_locks(paths: list[Path], backend_port: int) -> int | None:
-    section("2. WHO HAS THE FILES OPEN (a lock on the .tmp file is what produces WinError 32)")
+    section("2. WHO HAS THE FILES OPEN (a lock on a table file is what blocks a save)")
     backend_pid = listening_pid(backend_port)
     if backend_pid:
         say(f"  Review UI backend: port {backend_port} is served by PID {backend_pid} ({process_name(backend_pid)})")
@@ -299,7 +300,7 @@ def check_locks(paths: list[Path], backend_port: int) -> int | None:
     if holders is None:
         say("  (could not ask Windows who holds the files)")
     elif not holders:
-        say("  right now no program has the workbook or the .tmp file open")
+        say("  right now no program has a table file or a temp file open")
     else:
         for pid, name in holders:
             mark = "  <- the Review UI backend itself" if pid == backend_pid else ""
@@ -307,14 +308,14 @@ def check_locks(paths: list[Path], backend_port: int) -> int | None:
     return backend_pid
 
 
-def check_disk(run_dir: Path, workbook: Path, args) -> tuple[dict, dict]:
-    section("3. WHAT IS INSIDE THE EXCEL FILE (read from a copy; the real file is not touched)")
-    if not workbook.is_file():
-        say("  The workbook does not exist.")
+def check_disk(run_dir: Path, tables: Path, args) -> tuple[dict, dict]:
+    section("3. WHAT IS INSIDE THE CSV FILES (read from copies; the real files are not touched)")
+    if not tables.is_dir():
+        say("  The tables folder does not exist.")
         return {}, {}
-    sheets, read_seconds, copy = read_copy(workbook)
+    sheets, read_seconds, copy = read_copy(tables)
     disk = count_disk(sheets)
-    say(f"  copied and read in {read_seconds:.1f} s")
+    say(f"  read all tables in {read_seconds:.1f} s")
     say()
     say(f"  {'sheet':14s} {'rows':>7s} {'judged right':>13s} {'judged wrong':>13s} {'missed':>7s} {'fixed':>6s} {'reviewed page-fields':>21s}")
     totals = {"kv_judged": 0, "head_judged": 0, "kv_added": 0, "head_added": 0}
@@ -324,7 +325,7 @@ def check_disk(run_dir: Path, workbook: Path, args) -> tuple[dict, dict]:
             say(f"  {name:14s} SHEET MISSING")
             continue
         if info.get("no_review_columns"):
-            say(f"  {name:14s} {info['rows']:7d}   (no review columns: this workbook is from an older layout)")
+            say(f"  {name:14s} {info['rows']:7d}   (no review columns: these tables are from an older layout)")
             continue
         judged = info["right"] + info["wrong"]
         added = info["missed"] + info["fixed"]
@@ -332,17 +333,18 @@ def check_disk(run_dir: Path, workbook: Path, args) -> tuple[dict, dict]:
         totals["head_added" if name == HEADINGS else "kv_added"] += added
         say(f"  {name:14s} {info['rows']:7d} {info['right']:13d} {info['wrong']:13d} {info['missed']:7d} {info['fixed']:6d} {info['page_fields']:21d}")
     say()
-    say(f"  KV cases judged (right + wrong) in the file ..... {totals['kv_judged']}   (+ {totals['kv_added']} missed/fixed values you added)")
-    say(f"  Heading cases judged (right + wrong) in the file . {totals['head_judged']}   (+ {totals['head_added']} missed/fixed headings you added)")
+    say(f"  KV cases judged (right + wrong) on disk ..... {totals['kv_judged']}   (+ {totals['kv_added']} missed/fixed values you added)")
+    say(f"  Heading cases judged (right + wrong) on disk . {totals['head_judged']}   (+ {totals['head_added']} missed/fixed headings you added)")
     documents = {record for record, _, _ in disk["pages"]}
     say(f"  pages with at least one reviewed field ... {len(disk['pages'])}   in {len(documents)} documents")
     say(f"  pages with ALL 8 fields reviewed ......... {len(disk['fully_reviewed_pages'])}")
     stamps = [t for t in (parse_stamp(s) for s in disk["stamps"]) if t]
     if stamps:
-        say(f"  oldest review in the file: {local_time(min(stamps))}")
-        say(f"  NEWEST review in the file: {local_time(max(stamps))}  ({ago(max(stamps))});  the file itself was last written {local_time(workbook.stat().st_mtime)} ({ago(workbook.stat().st_mtime)})")
+        newest_file = max(path.stat().st_mtime for path in tables.glob("*.csv"))
+        say(f"  oldest review on disk: {local_time(min(stamps))}")
+        say(f"  NEWEST review on disk: {local_time(max(stamps))}  ({ago(max(stamps))});  the tables were last written {local_time(newest_file)} ({ago(newest_file)})")
     else:
-        say("  the file contains NO reviews at all")
+        say("  the tables contain NO reviews at all")
 
     overall = sheets.get("Overall")
     if overall is not None and len(overall):
@@ -372,7 +374,7 @@ def official_scores(disk: dict, run_name: str):
         scratch = Path(tempfile.mkdtemp(prefix="review_check_score_"))
         run_dir = scratch / run_name
         run_dir.mkdir()
-        shutil.copy2(disk["copy"], run_dir / labels.config.Workbook_Name)
+        shutil.copytree(disk["copy"], run_dir / labels.config.Tables_Folder)
         pooled = labels.pooled_labels([run_dir])
         return labels.evaluate_all(run_dir, pooled)
     except Exception as exc:  # noqa: BLE001
@@ -385,7 +387,7 @@ def check_backend(api: Api, run_id: str, disk: dict):
         api.get("/api/health", timeout=20)
     except Exception as exc:  # noqa: BLE001
         say(f"  The backend does not answer ({exc}).")
-        say("  If it was stopped, everything that was not already in the Excel file is gone; the file is all that is left.")
+        say("  If it was stopped, everything that was not already saved to disk is gone; the files on disk are all that is left.")
         return None
     runs = api.get("/api/runs")
     say(f"  runs the backend lists: {len(runs['runs'])}")
@@ -449,11 +451,11 @@ def memory_counts(entries: list[dict]) -> dict:
 
 
 def compare(disk: dict, entries: list[dict]) -> bool:
-    section("6. MEMORY (backend) vs THE EXCEL FILE")
+    section("6. MEMORY (backend) vs THE CSV FILES")
     memory = memory_counts(entries)
     disk_keys = disk.get("page_fields", set())
     mem_keys = {(e["record_id"], e["page_number"], e["file_name"], e["field"]) for e in entries}
-    say(f"  {'sheet':14s} {'in memory':>10s} {'in the file':>12s} {'only in memory':>15s}   | judged cases: memory vs file")
+    say(f"  {'sheet':14s} {'in memory':>10s} {'on disk':>12s} {'only in memory':>15s}   | judged cases: memory vs disk")
     only_memory = 0
     for name in [*KV_SHEETS, HEADING_FIELD_SHEET]:
         field = FIELD_OF_SHEET[name]
@@ -466,20 +468,20 @@ def compare(disk: dict, entries: list[dict]) -> bool:
     mem_kv = sum(v["judged"] for k, v in memory.items() if not k.startswith("heading_"))
     mem_head = sum(v["judged"] for k, v in memory.items() if k.startswith("heading_"))
     say()
-    say(f"  KV cases judged:      memory {mem_kv}   file {disk.get('totals', {}).get('kv_judged')}")
-    say(f"  Heading cases judged: memory {mem_head}   file {disk.get('totals', {}).get('head_judged')}")
-    say(f"  page-fields reviewed ONLY in the backend's memory (not in the file): {only_memory}")
+    say(f"  KV cases judged:      memory {mem_kv}   disk {disk.get('totals', {}).get('kv_judged')}")
+    say(f"  Heading cases judged: memory {mem_head}   disk {disk.get('totals', {}).get('head_judged')}")
+    say(f"  page-fields reviewed ONLY in the backend's memory (not on disk): {only_memory}")
     return only_memory == 0
 
 
 HEADING_FIELD_SHEET = HEADINGS
 
 
-def check_speed(run_dir: Path, workbook: Path, disk: dict, api: Api | None) -> dict:
+def check_speed(run_dir: Path, tables: Path, disk: dict, api: Api | None) -> dict:
     section("7. SPEED: how long a save takes on this machine")
     result: dict = {}
     # (a) can a temp file be written and replaced in this folder at all
-    test_tmp, test_final = run_dir / (SCRATCH + "write_test.tmp"), run_dir / (SCRATCH + "write_test.xlsx")
+    test_tmp, test_final = run_dir / (SCRATCH + "write_test.tmp"), run_dir / (SCRATCH + "write_test.csv")
     try:
         started = time.perf_counter()
         test_tmp.write_bytes(os.urandom(1_000_000))
@@ -493,35 +495,32 @@ def check_speed(run_dir: Path, workbook: Path, disk: dict, api: Api | None) -> d
     finally:
         for path in (test_tmp, test_final):
             path.unlink(missing_ok=True)
-    # (b) how long the whole workbook takes to write (what every background save does)
+    # (b) how long every table takes to write (the most one save can ever cost) and to read back
     frames = disk.get("sheets_frames")
     if frames and not ARGS.no_bench:
-        sys.path.insert(0, str(ROOT / "Extraction"))
-        bench_tmp, bench_final = run_dir / (SCRATCH + "benchmark.tmp"), run_dir / (SCRATCH + "benchmark.xlsx")
+        bench = run_dir / (SCRATCH + "benchmark")
         try:
-            from openpyxl import Workbook
-
+            shutil.rmtree(bench, ignore_errors=True)
+            bench.mkdir()
             started = time.perf_counter()
-            book = Workbook(write_only=True)
             cells = 0
+            slowest = ("", 0.0)
             for title, frame in frames.items():
-                sheet = book.create_sheet(title)
-                sheet.append([str(c) for c in frame.columns])
-                for row in frame.astype(object).itertuples(index=False, name=None):
-                    sheet.append(list(row))
+                t = time.perf_counter()
+                frame.to_csv(bench / f"{title}.csv", index=False, encoding="utf-8-sig", lineterminator="\n")
+                took = time.perf_counter() - t
                 cells += frame.shape[0] * frame.shape[1]
-            build = time.perf_counter() - started
-            book.save(bench_tmp)
-            os.replace(bench_tmp, bench_final)
+                if took > slowest[1]:
+                    slowest = (title, took)
             total = time.perf_counter() - started
-            say(f"  writing the whole workbook (what each background save does): {total:.1f} s  ({cells / 1e6:.2f} million cells; {build:.1f} s building rows, {total - build:.1f} s compressing and saving)")
-            say(f"  reading the whole workbook back: {disk['read_seconds']:.1f} s")
+            say(f"  writing EVERY table: {total:.2f} s  ({cells / 1e6:.2f} million cells); the biggest, {slowest[0]}, takes {slowest[1]:.2f} s")
+            say(f"  a save rewrites only the sheet it changed, so one save costs at most {slowest[1]:.2f} s on this machine")
+            say(f"  reading every table back: {disk['read_seconds']:.2f} s")
             result["write_seconds"], result["cells"] = total, cells
         except Exception as exc:  # noqa: BLE001
             say(f"  could not benchmark the write: {exc}")
         finally:
-            for path in (bench_tmp, bench_final):
-                path.unlink(missing_ok=True)
+            shutil.rmtree(bench, ignore_errors=True)
     elif ARGS.no_bench:
         say("  (benchmark skipped: --no-bench)")
     # (c) how fast the backend answers read-only requests
@@ -537,7 +536,7 @@ def verdict(files: dict, only_memory_ok: bool | None, detail: dict | None, disk:
     section("8. VERDICT")
     if detail is None:
         say("  The backend is not reachable, so memory could not be compared.")
-        say("  What is in the Excel file (section 3) is what you have.")
+        say("  What is on disk (section 3) is what you have.")
         return
     saving = detail["saving"] or bool(detail["save_error"])
     if only_memory_ok is None:
@@ -546,15 +545,15 @@ def verdict(files: dict, only_memory_ok: bool | None, detail: dict | None, disk:
             say("  Do not close the backend. Run this again without --no-backup to get the backup and the field-by-field proof.")
         else:
             say("  The backend reports nothing left to save and no error, but this run skipped the comparison (--no-backup).")
-            say("  Run it once without --no-backup: only that comparison proves the file holds everything.")
+            say("  Run it once without --no-backup: only that comparison proves the files hold everything.")
         return
     if only_memory_ok and not saving:
-        say("  SAFE: every review the backend holds is in the Excel file, and the backend has nothing left to save.")
+        say("  SAFE: every review the backend holds is on disk, and the backend has nothing left to save.")
         say("        You can close the backend and frontend.")
         return
     say("  NOT SAFE TO CLOSE THE BACKEND YET.")
     if not only_memory_ok:
-        say("  - some reviews exist only in the backend's memory (section 6). If it is closed or restarted they are lost from the file.")
+        say("  - some reviews exist only in the backend's memory (section 6). If it is closed or restarted they are lost.")
     if saving:
         say(f"  - the backend still has unsaved changes / a save error: {detail['save_error'] or 'saving...'}")
     say("  - the backup file written in section 5 holds all of those reviews; keep it. It can be re-applied with --restore.")
@@ -607,7 +606,7 @@ ARGS: argparse.Namespace
 def main() -> int:
     global ARGS
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--run", help="run folder name (KV_Run_...) or path to a KV_Extraction.xlsx; default: the run with the most reviews in the backend, else the newest")
+    parser.add_argument("--run", help="run folder name (KV_Run_...) or its full path; default: the run with the most reviews in the backend, else the newest")
     parser.add_argument("--runs-dir", help="the Runs folder (default: read from Extraction/Util/config.py)")
     parser.add_argument("--api", default="http://127.0.0.1:3000", help="the Review UI backend (default %(default)s)")
     parser.add_argument("--expect-kv", type=int, help="the number of KV cases you reviewed (for comparison)")
@@ -615,7 +614,7 @@ def main() -> int:
     parser.add_argument("--expect-pages", type=int, help="the number of pages you reviewed")
     parser.add_argument("--expect-docs", type=int, help="the number of documents you reviewed")
     parser.add_argument("--no-backup", action="store_true", help="do not write the backup JSON")
-    parser.add_argument("--no-bench", action="store_true", help="do not benchmark writing the workbook")
+    parser.add_argument("--no-bench", action="store_true", help="do not benchmark writing the tables")
     parser.add_argument("--restore", metavar="BACKUP_JSON", help="re-apply a backup to the running backend (needs --run)")
     ARGS = parser.parse_args()
     api = Api(ARGS.api)
@@ -626,19 +625,19 @@ def main() -> int:
         restore(api, Path(ARGS.restore), Path(ARGS.run).name)
         return 0
 
-    say(f"review workbook check   {datetime.now():%Y-%m-%d %H:%M:%S}   {platform.node()}   Python {platform.python_version()}   {platform.system()} {platform.release()}")
+    say(f"review tables check   {datetime.now():%Y-%m-%d %H:%M:%S}   {platform.node()}   Python {platform.python_version()}   {platform.system()} {platform.release()}")
     port = int(urllib.parse.urlparse(ARGS.api).port or 3000)
 
     # which run
     runs_dir = Path(ARGS.runs_dir) if ARGS.runs_dir else runs_dir_from_config()
     chosen: Path | None = None
-    if ARGS.run and ARGS.run.lower().endswith(".xlsx"):
-        chosen = Path(ARGS.run).resolve().parent
+    if ARGS.run and Path(ARGS.run).is_dir() and (Path(ARGS.run) / TABLES).is_dir():
+        chosen = Path(ARGS.run).resolve()
     elif runs_dir and runs_dir.is_dir():
         if ARGS.run:
             chosen = runs_dir / ARGS.run
         else:
-            candidates = sorted((p for p in runs_dir.glob("KV_Run_*") if (p / WORKBOOK).is_file()), key=lambda p: p.name)
+            candidates = sorted((p for p in runs_dir.glob("KV_Run_*") if (p / TABLES / "Overall.csv").is_file()), key=lambda p: p.name)
             try:
                 listed = {r["id"]: r["reviewed_pages"] for r in api.get("/api/runs", timeout=60)["runs"]}
                 best = max(candidates, key=lambda p: (listed.get(p.name, 0), p.name), default=None)
@@ -650,14 +649,14 @@ def main() -> int:
         return 2
     say(f"checking run: {chosen.name}   (folder {chosen})")
 
-    workbook, tmp, excel_lock = check_files(chosen)
-    backend_pid = check_locks([workbook, tmp], port)
-    disk, totals = check_disk(chosen, workbook, ARGS)
+    tables, leftovers = check_files(chosen)
+    backend_pid = check_locks([*sorted(tables.glob("*.csv")), *leftovers] if tables.is_dir() else [], port)
+    disk, totals = check_disk(chosen, tables, ARGS)
 
     score = official_scores(disk, chosen.name) if disk else None
     if isinstance(score, dict):
         say()
-        say("  scored the way the Review UI scores it (from the file): "
+        say("  scored the way the Review UI scores it (from the files): "
             f"KV {score['kv']['accuracy']}% ({score['kv']['correct']} right, {score['kv']['wrong']} wrong, {score['kv']['missed']} missed); "
             f"Headings {score['heading']['accuracy']}% ({score['heading']['correct']} right, {score['heading']['wrong']} wrong, {score['heading']['missed']} missed)")
     elif isinstance(score, str):
@@ -687,9 +686,9 @@ def main() -> int:
         ui_kv_disk = pairs(score["kv"]) if isinstance(score, dict) else None
         ui_head_disk = pairs(score["heading"]) if isinstance(score, dict) else None
         say("  'KV cases' / 'heading cases' as the UI top bar counts them are right + wrong + missed:")
-        say(f"    KV      : backend memory {ui_kv_mem}   Excel file {ui_kv_disk}")
-        say(f"    Headings: backend memory {ui_head_mem}   Excel file {ui_head_disk}")
-        say("    (the backend scores with the reviews of every run on the same OCR, the file number only with this run, so they can differ slightly)")
+        say(f"    KV      : backend memory {ui_kv_mem}   disk {ui_kv_disk}")
+        say(f"    Headings: backend memory {ui_head_mem}   disk {ui_head_disk}")
+        say("    (the backend scores with the reviews of every run on the same OCR, the disk number only with this run, so they can differ slightly)")
         say("  and as raw judged rows (candidates you ticked or crossed):")
         for label, mine, mem_value, disk_value in (
             ("KV cases", ARGS.expect_kv, mem_kv, totals.get("kv_judged") if totals else None),
@@ -698,9 +697,9 @@ def main() -> int:
             ("documents", ARGS.expect_docs, detail["reviewed_documents"] if detail else None, docs_disk),
         ):
             if mine is not None:
-                say(f"    {label:24s} you counted {mine:5d}   backend memory: {mem_value}   Excel file: {disk_value}")
+                say(f"    {label:24s} you counted {mine:5d}   backend memory: {mem_value}   disk: {disk_value}")
 
-    speed = check_speed(chosen, workbook, disk or {}, api if detail is not None else None)
+    speed = check_speed(chosen, tables, disk or {}, api if detail is not None else None)
     verdict({}, only_memory_ok, detail, disk or {}, speed)
 
     report = Path.cwd() / f"review_check_report_{datetime.now():%Y%m%d_%H%M%S}.txt"

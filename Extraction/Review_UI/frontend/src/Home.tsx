@@ -160,7 +160,7 @@ export default function Home({ onReview }: { onReview: (runId: string) => void }
                             <FolderOpen size={20} aria-hidden="true" />
                           </span>
                           <h3>No runs yet</h3>
-                          <p>Each run of Extraction/run.py creates a KV_Run_* folder with a KV_Extraction.xlsx under the output path in config.py.</p>
+                          <p>Each run of Extraction/run.py creates a KV_Run_* folder with a KV_Extraction folder of CSV tables under the output path in config.py.</p>
                         </div>
                       </td>
                     </tr>

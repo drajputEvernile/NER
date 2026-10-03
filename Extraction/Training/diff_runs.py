@@ -1,4 +1,4 @@
-"""Selected value per page and field in two runs, side by side (from their workbooks).
+"""Selected value per page and field in two runs, side by side (from their tables).
 
 Usage:
   .\\.venv\\Scripts\\python.exe Extraction\\Training\\diff_runs.py KV_Run_A KV_Run_B
@@ -33,7 +33,7 @@ def selected(run: Path) -> pd.DataFrame:
     """One row per (page, field): the selected value(s), '' when nothing was selected."""
     log = run_log(run)
     if log.empty:
-        raise SystemExit(f"no workbook with candidates under {run}")
+        raise SystemExit(f"no tables with candidates under {run}")
     picked = log[log.apply(run_selected, axis=1)] if len(log) else log
     values = (
         picked.groupby(PAGE)

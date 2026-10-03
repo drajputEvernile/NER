@@ -22,7 +22,7 @@ import pandas as pd
 import pipeline
 from Training.labels import (
     KV_FIELDS,
-    has_workbook,
+    has_tables,
     extracted_pairs,
     evaluate_log,
     pooled_labels,
@@ -56,7 +56,7 @@ def main() -> int:
     parser.add_argument("--run", help="reviewed run (default: the newest KV_Run_*)")
     parser.add_argument("--show", nargs="*", default=[], help="fields whose wrong / missed pairs to list")
     args = parser.parse_args()
-    runs = [path for path in run_dirs(None) if has_workbook(path)]
+    runs = [path for path in run_dirs(None) if has_tables(path)]
     run_dir = next(path for path in runs if path.name == args.run) if args.run else runs[-1]
     pooled = pooled_labels(runs)
     log = current_log(run_dir)

@@ -1,7 +1,7 @@
 # How Extraction works
 
 This document explains the whole system as it stands today: the two models, what a run saves,
-what the reviewer does, and how the saved workbook trains the next version.
+what the reviewer does, and how the saved tables train the next version.
 
 ## In one paragraph
 
@@ -10,10 +10,10 @@ models**. **KV_Extraction** finds printed labels ("keys") such as `DOB:`, `Acct#
 signed by` and reads the value next to each from page geometry plus a small local NER model
 (GLiNER). It reads the OCR JSON only; it never opens the page image. **Heading_Detector** finds
 section headings with a layout model on the page image and gives each the text of the OCR words
-under it, so it needs both. `Extraction/run.py` runs both on every page and saves **one Excel
-workbook per run**, `KV_Extraction.xlsx`, holding every candidate either model considered and the
+under it, so it needs both. `Extraction/run.py` runs both on every page and saves **one folder of CSV
+tables per run**, `KV_Extraction\`, holding every candidate either model considered and the
 sentence it was read from. In the Review UI a reviewer judges each extracted value; the reviews are
-written into the same workbook. That workbook is also the training data: it is the one file that
+written into the same tables. Those tables are also the training data: the one folder that
 has to move between machines.
 
 ```mermaid
@@ -23,7 +23,7 @@ flowchart LR
     Img[Page image] --> HD
     KV --> Run[run.py]
     HD --> Run
-    Run --> WB[(KV_Run_*/KV_Extraction.xlsx)]
+    Run --> WB[(KV_Run_*/KV_Extraction/*.csv)]
     WB --> UI[Review UI]
     UI -->|reviews written back| WB
     WB --> Train[Training: dataset / train]
@@ -108,7 +108,7 @@ them from it (the output folders under `Output_Root` are derived).
 | Rerun the documents of an earlier run | `... Extraction\run.py --fresh --records-from KV_Run_... --model-version v003` |
 | UI backend (port 3000) | `.\.venv\Scripts\python.exe -m uvicorn Review_UI.backend.app:app --app-dir Extraction --host 127.0.0.1 --port 3000 --reload` |
 | UI frontend (port 3001) | `cd Extraction\Review_UI\frontend; npm run dev` → http://127.0.0.1:3001 |
-| Build a training dataset from every reviewed workbook | `... Extraction\Training\dataset.py` |
+| Build a training dataset from every reviewed run | `... Extraction\Training\dataset.py` |
 | Train a new version (`--model kv`, `heading` or `both`) | `... Extraction\Training\train.py --model both` |
 | Compare v0 with a version | `... Extraction\Training\evaluate.py --version v003 --split test` |
 | Held-out accuracy (leave one document out) | `... Extraction\Training\crossval.py --dataset ds_x` |
@@ -154,12 +154,12 @@ and boxes alone and never opens the image; only the heading model and the Review
    offline. If one can't load the run stops with the error instead of quietly finding nothing.
 3. **Per document**, every page goes through `pipeline.extract_document`: KV_Extraction first
    (JSON only), then Heading_Detector (JSON + page image). The candidates become rows for the nine
-   sheets of the workbook; with a trained version its models set the `accepted` / `selected`
+   sheets of the tables; with a trained version its models set the `accepted` / `selected`
    columns, and the rules' own choice stays in `rule_accepted` / `rule_selected`.
-4. **The workbook is written** (all sheets, atomically) at most once a minute and when the run
-   ends. A document counts as completed only once a written workbook holds it, so stopping a run
+4. **The tables are written** (every sheet's CSV, atomically) at most every 20 seconds and when the run
+   ends. A document counts as completed only once written tables hold it, so stopping a run
    (Ctrl+C) and starting it again without `--fresh` skips what is saved and redoes the rest.
-5. **That is all a run saves**: `run.json` and `KV_Extraction.xlsx`. No overlay images, no
+5. **That is all a run saves**: `run.json` and the `KV_Extraction\` tables. No overlay images, no
    per-field CSVs, no candidate folders.
 
 ---
@@ -346,9 +346,9 @@ heading model to decide.
 
 ---
 
-## 6. What a run saves: `KV_Extraction.xlsx`
+## 6. What a run saves: the `KV_Extraction\` tables
 
-One workbook per run, in `{Run_Output}/KV_Run_{id}/`. Sheets: `Member_Name`, `Member_ID`,
+One folder of CSV tables per run, `{Run_Output}/KV_Run_{id}/KV_Extraction/`, one file per sheet: `Member_Name`, `Member_ID`,
 `Member_DOB`, `Provider_Name`, `E_Sign`, `DOS`, `Page_No`, `Headings`, `Overall`.
 
 **`Overall`** has one row per page with the final selected value of every field:
@@ -391,7 +391,7 @@ Metrics bar: total batches (distinct sets of documents), total runs, total docum
 avg pages / document, avg time / page, latest model accuracy (KV and headings, over the documents
 reviewed). Table: Run Name, Total Documents, Total Pages, Reviewed Pages, Current KV_Accuracy,
 Current H_Accuracy, Model, Start Time, Total Time, Actions (review, rerun with another version).
-Only runs that have a `KV_Extraction.xlsx` are listed.
+Only runs that have a `KV_Extraction` tables folder are listed.
 
 ### 7.2 Batch review page
 
@@ -416,10 +416,14 @@ For an e-signature the reviewer selects the whole value in one go (name and date
 
 ## 8. What happens when you review
 
-- The backend holds the run's workbook in memory (`Training/labels.py` `RunStore`). A review is
-  written onto the rows, and the workbook is saved back a few seconds after the last change
-  (atomic). **Do not keep the workbook open in Excel while reviewing**: Windows locks it, the save
-  waits and retries, and the UI shows a banner; nothing is lost.
+- The backend holds the run's tables in memory (`Training/labels.py` `RunStore`). A review is
+  written onto the rows, and a single writer thread saves just the CSV of the sheet that changed a
+  fraction of a second later (atomic, so a crash never leaves half a file). If another program has
+  that file open the save waits and retries every few seconds and the UI shows a banner; nothing is
+  lost while the backend runs.
+- What a run extracted does not change when it is reviewed, so the backend reads and indexes it once when
+  the run is loaded; a review edits only its own page-field's rows, label and score, so a save and the
+  refresh after it take tens of milliseconds even on a run of hundreds of documents.
 - Accuracy counts key-value pairs: an extracted pair is **right** when a true pair has the same key
   and value (the same candidate, or the same words under the same key words); an extracted pair
   with a wrong key or value is **wrong**; a true pair the run did not extract is **missed**.
@@ -435,10 +439,10 @@ For an e-signature the reviewer selects the whole value in one go (name and date
 
 ## 9. Training
 
-Training reads the workbooks only (the sentence, the boxes and the features are in them); it needs
+Training reads the tables only (the sentence, the boxes and the features are in them); it needs
 neither the images nor the OCR.
 
-1. `Training/dataset.py` joins every reviewed workbook's candidates with its reviews into one
+1. `Training/dataset.py` joins every reviewed run's candidates with its reviews into one
    labelled snapshot (`Output/Training/datasets/ds_*`). A candidate's label is the reviewer's verdict,
    else whether it matches a true pair; true pairs no candidate matches are "generator misses" (a rules
    job, since a ranker only chooses among candidates). About 1 record in 5 is a test record, fixed by id.
@@ -466,8 +470,7 @@ The sentences collected around every key and value are also the input for fine-t
   unless the page names a provider; headings are section labels, not exam sub-fields.
 - Headings need the image; recall on short colon labels comes from the trained heading model.
 - Runs made before this layout (per-field CSVs, overlays, `labels.json`) are not listed or reviewable.
-- One run at a time can be reviewed with writes to its workbook; two Review UI processes on the same
-  workbook would overwrite each other.
+- Two Review UI processes on the same run would overwrite each other's tables.
 
 ---
 
@@ -475,16 +478,16 @@ The sentences collected around every key and value are also the input for fine-t
 
 | File | What it does |
 |---|---|
-| `Extraction/run.py` | run queue, resume, and writing the workbook |
+| `Extraction/run.py` | run queue, resume, and writing the tables |
 | `Extraction/pipeline.py` | both models on a page (`extract_page_kv`, `extract_page_headings`) |
 | `Extraction/Util/config.py` | paths, model folders and sources, the Python version check |
 | `Extraction/Util/model_setup.py` | downloads missing public models before a run |
-| `Extraction/Util/workbook.py` | reads and writes the workbook (atomic) |
+| `Extraction/Util/tables.py` | reads and writes the CSV tables (atomic, one sheet at a time) |
 | `Extraction/Util/keys.py`, `geometry.py`, `window.py`, `model.py`, `dates.py`, `mentions.py`, `tokens.py` | key catalog and matching, words and boxes, value windows, GLiNER, dates, repeated mentions |
 | `Extraction/{Member_DOB,Member_ID,Member_Name,Provider_Name,Electronic_Signature,DOS,Page_No}/extract.py` | per-field rules; `keys.json` beside them |
 | `Extraction/Heading/extract.py` | heading candidates from the Heron detector, rules and levels |
-| `Extraction/Training/features.py` | candidate columns, the workbook layout, the sentence builder |
-| `Extraction/Training/labels.py` | reviews in the workbook (`RunStore`), scoring, pooled labels |
+| `Extraction/Training/features.py` | candidate columns, the table layout, the sentence builder |
+| `Extraction/Training/labels.py` | reviews in the tables (`RunStore`), scoring, pooled labels |
 | `Extraction/Training/normalize.py` | value normal forms |
 | `Extraction/Training/ocr.py` | OCR words and lines for the UI |
 | `Extraction/Training/dataset.py`, `train.py`, `evaluate.py`, `crossval.py`, `model.py`, `registry.py` | training, scoring, versions |
